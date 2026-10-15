@@ -1,0 +1,16 @@
+repos:
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.109.2
+    hooks:
+      - id: terraform_fmt
+      - id: terraform_validate
+
+  # Optional: install Ruff locally before running this manual-stage hook.
+  - repo: local
+    hooks:
+      - id: ruff
+        name: ruff check (optional)
+        entry: ruff check
+        language: system
+        types: [python]
+        stages: [manual]

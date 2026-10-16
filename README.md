@@ -7,7 +7,7 @@ TODO: Describe the project's purpose and scope.
 TODO: Document the architecture that is implemented and verified.
 
 ## What is implemented
-TODO: List only features implemented and verified in this repository.
+- Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
 
 ## Environments
 TODO: Document the available environments and their configuration.

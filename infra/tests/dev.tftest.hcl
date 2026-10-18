@@ -1,0 +1,88 @@
+mock_provider "google" {}
+
+variables {
+  env                        = "dev"
+  project_id                 = "dep-2610-dev"
+  region                     = "europe-southwest1"
+  force_destroy              = true
+  deletion_protection        = false
+  delete_contents_on_destroy = true
+}
+
+run "dev_plan" {
+  command = plan
+
+  assert {
+    condition     = output.raw_bucket_name == "dep-2610-dev-raw" && output.dataset_id == "network_perf"
+    error_message = "DEV resource names must be stable."
+  }
+
+  assert {
+    condition     = toset(keys(output.table_ids)) == toset(["ookla_tiles", "load_log", "mart_quarterly_performance"])
+    error_message = "Only the three native tables belong so far."
+  }
+}
+
+run "reversed_longitude" {
+  command = plan
+  variables {
+    region_bbox = { min_lon = 10, max_lon = -10, min_lat = 35, max_lat = 44 }
+  }
+  expect_failures = [var.region_bbox]
+}
+
+run "reversed_latitude" {
+  command = plan
+  variables {
+    region_bbox = { min_lon = -10, max_lon = 10, min_lat = 44, max_lat = 35 }
+  }
+  expect_failures = [var.region_bbox]
+}
+
+run "out_of_range_coordinates" {
+  command = plan
+  variables {
+    region_bbox = { min_lon = -181, max_lon = 10, min_lat = 35, max_lat = 91 }
+  }
+  expect_failures = [var.region_bbox]
+}
+
+run "zero_area" {
+  command = plan
+  variables {
+    region_bbox = { min_lon = -10, max_lon = -10, min_lat = 35, max_lat = 44 }
+  }
+  expect_failures = [var.region_bbox]
+}
+
+run "quarter_before_tile_coordinates" {
+  command = plan
+  variables {
+    min_quarter = "2023-Q2"
+  }
+  expect_failures = [var.min_quarter]
+}
+
+run "malformed_quarter" {
+  command = plan
+  variables {
+    min_quarter = "2024-Q5"
+  }
+  expect_failures = [var.min_quarter]
+}
+
+run "non_numeric_quarter" {
+  command = plan
+  variables {
+    min_quarter = "invalid"
+  }
+  expect_failures = [var.min_quarter]
+}
+
+run "invalid_retention" {
+  command = plan
+  variables {
+    raw_retention_days = 0
+  }
+  expect_failures = [var.raw_retention_days]
+}

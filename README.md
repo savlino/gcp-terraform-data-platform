@@ -8,6 +8,7 @@ TODO: Document the architecture that is implemented and verified.
 
 ## What is implemented
 - Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
+- DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and 13 mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
 
 ## Environments
 TODO: Document the available environments and their configuration.
@@ -28,7 +29,15 @@ TODO: Document verified cost controls and teardown steps.
 TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
-TODO: List planned or excluded features that are not implemented.
+- `ext_ookla_raw` (deferred until raw files exist), ingestion, transformations and populated marts.
+- Environment IAM, networking, secrets, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration.
+- Verified DEV deployment. No dataset default table expiration is configured.
+
+## Data attribution
+Planned source: [Speedtest by Ookla Open Data](https://github.com/teamookla/ookla-open-data),
+provided by Ookla under [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/).
+Non-commercial use only; attribution and ShareAlike obligations apply. No real
+source data files are committed. Column mappings follow [the source schema](docs/source-schema.md).
 
 ## Known limitations
 TODO: Record known limitations.

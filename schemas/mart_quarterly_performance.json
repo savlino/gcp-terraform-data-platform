@@ -1,0 +1,14 @@
+[
+  {"name": "network_type", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "quarter_start", "type": "DATE", "mode": "REQUIRED"},
+  {"name": "quadkey_prefix", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "avg_d_mbps", "type": "FLOAT", "mode": "NULLABLE", "description": "Download speed weighted by tests."},
+  {"name": "avg_u_mbps", "type": "FLOAT", "mode": "NULLABLE", "description": "Upload speed weighted by tests."},
+  {"name": "avg_lat_ms", "type": "FLOAT", "mode": "NULLABLE", "description": "Latency weighted by tests."},
+  {"name": "avg_lat_down_ms", "type": "FLOAT", "mode": "NULLABLE"},
+  {"name": "avg_lat_up_ms", "type": "FLOAT", "mode": "NULLABLE"},
+  {"name": "tile_count", "type": "INTEGER", "mode": "REQUIRED"},
+  {"name": "total_tests", "type": "INTEGER", "mode": "REQUIRED"},
+  {"name": "download_qoq_pct", "type": "FLOAT", "mode": "NULLABLE", "description": "Download change from previous quarter in percent."},
+  {"name": "loaded_at", "type": "TIMESTAMP", "mode": "REQUIRED"}
+]

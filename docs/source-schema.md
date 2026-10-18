@@ -1,0 +1,11 @@
+quadkey: large_string
+tile: large_string
+tile_x: double
+tile_y: double
+avg_d_kbps: int64
+avg_u_kbps: int64
+avg_lat_ms: int64
+avg_lat_down_ms: double
+avg_lat_up_ms: double
+tests: int64
+devices: int64

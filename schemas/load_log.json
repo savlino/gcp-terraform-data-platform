@@ -1,0 +1,10 @@
+[
+  {"name": "network_type", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "quarter_start", "type": "DATE", "mode": "REQUIRED"},
+  {"name": "source_uri", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "source_etag", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "source_row_count", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "loaded_row_count", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "status", "type": "STRING", "mode": "REQUIRED"},
+  {"name": "loaded_at", "type": "TIMESTAMP", "mode": "REQUIRED"}
+]

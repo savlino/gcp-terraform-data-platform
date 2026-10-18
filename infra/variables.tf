@@ -97,3 +97,9 @@ variable "delete_contents_on_destroy" {
   description = "Allow deletion of dataset contents on destroy; keep false in prod."
   default     = false
 }
+
+variable "developer_principal" {
+  type        = string
+  description = "Optional email IAM principal for runtime impersonation; ignored in prod. Validated by the IAM module."
+  default     = null
+}

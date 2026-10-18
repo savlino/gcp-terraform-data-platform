@@ -12,3 +12,8 @@ output "table_ids" {
   description = "Native BigQuery table IDs keyed by purpose."
   value       = module.bigquery.table_ids
 }
+
+output "runtime_service_account_email" {
+  description = "Ingestion runtime identity; not the Terraform deployment identity."
+  value       = module.iam.service_account_email
+}

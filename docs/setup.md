@@ -26,6 +26,15 @@ Complete this checklist before building or deploying the platform. Commands in t
   gcloud config set account you@gmail.com
   ```
 
+- [ ] Before running impersonated checks, set the existing service account email
+  and stop if it is empty. Keep this guard in the same script block as the checks
+  so a failure prevents subsequent commands from running as your own user:
+
+  ```powershell
+  $sa = Read-Host 'Existing service account email for impersonated checks'
+  if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
+  ```
+
 ## 3. Create the projects and link billing
 
 - [ ] List the billing accounts available to your account and copy the account ID:

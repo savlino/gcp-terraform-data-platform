@@ -8,7 +8,8 @@ TODO: Document the architecture that is implemented and verified.
 
 ## What is implemented
 - Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
-- DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and 13 mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
+- DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
+- Runtime IAM configuration: dedicated ingestion service account, raw-bucket Object User, dataset Data Editor and project Job User. Optional developer impersonation is disabled by default and never granted in PROD. Local mock tests cover these rules; live permission checks remain unverified. See [security and verification](docs/security.md).
 
 ## Environments
 TODO: Document the available environments and their configuration.
@@ -30,7 +31,7 @@ TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
 - `ext_ookla_raw` (deferred until raw files exist), ingestion, transformations and populated marts.
-- Environment IAM, networking, secrets, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration.
+- Networking, secrets, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration and a Terraform deployment identity.
 - Verified DEV deployment. No dataset default table expiration is configured.
 
 ## Data attribution

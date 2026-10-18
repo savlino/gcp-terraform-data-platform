@@ -1,9 +1,11 @@
 # Environment infrastructure
 
-This root composes [raw storage](../modules/storage/README.md) and
-[BigQuery](../modules/bigquery/README.md). The bucket and dataset receive the same
-`region`. Only DEV environment files are supplied. It creates five resources:
-one bucket, one dataset and three empty native tables.
+This root composes [raw storage](../modules/storage/README.md),
+[BigQuery](../modules/bigquery/README.md) and [runtime IAM](../modules/iam/README.md).
+The bucket and dataset receive the same `region`. Only DEV environment files are
+supplied. It creates nine resources by default: one bucket, one dataset, three
+empty native tables, one runtime service account and three IAM members.
+An explicit non-PROD `developer_principal` adds one service-account IAM member.
 
 ## Configuration
 
@@ -21,7 +23,10 @@ one bucket, one dataset and three empty native tables.
   table deletion protection. Future PROD variables must reverse those flags.
 - No dataset default table expiration is set. Raw objects expire after 30 days
   in DEV; BigQuery native data does not expire automatically.
-- `ext_ookla_raw` is deferred until following steps. No IAM, network, app, scheduler,
+- Runtime IAM uses bucket-scoped Object User, dataset-scoped Data Editor and
+  project-scoped Job User. Developer impersonation defaults to disabled and is
+  never granted in PROD. See [security checks](../docs/security.md).
+- `ext_ookla_raw` is deferred until following steps. No network, app, scheduler,
   secrets or CI resources are part of current implementation.
 
 ## Prerequisites and authentication
@@ -36,7 +41,8 @@ Do not run apply until you have reviewed the plan.
    offline checks; do not fall back to service-account keys or an Owner identity.
    Your user needs permission to impersonate it. The service account needs
    object access on the ops state bucket and permissions to manage DEV buckets,
-   datasets and tables. Scope grants to the intended resources where possible;
+   datasets and tables, plus service-account creation and IAM get/set permissions
+   for the runtime grants. Scope grants to the intended resources where possible;
    bucket/dataset creation also needs the corresponding project permissions.
 3. Set `$sa` to that account's email (do not use a key file), then authenticate:
 
@@ -64,7 +70,7 @@ terraform -chdir=infra validate
 terraform -chdir=infra test
 ```
 
-Expected: valid configuration and `13 passed, 0 failed`. Tests mock Google:
+Expected: valid configuration and `18 passed, 0 failed`. Tests mock Google:
 they check naming, schemas, labels, partition filters, retention, destroy flags
 and input validation. They do not prove deployed resources or API behavior.
 Negative tests include reversed/out-of-range/zero-area boxes, malformed quarters,
@@ -78,9 +84,12 @@ terraform -chdir=infra workspace show
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
-Expected workspace: `default`. For a fresh DEV state, expect **5 to add, 0 to
+Expected workspace: `default`. For a fresh DEV state with the default null
+developer principal, expect **9 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
-touches bootstrap, another environment, or includes IAM/network resources.
+touches bootstrap, another environment, or includes network resources.
+If already applied without drift, expect only four IAM/service-account
+additions. For optional developer impersonation, follow (../docs/security.md).
 Review it before applying:
 
 ```powershell

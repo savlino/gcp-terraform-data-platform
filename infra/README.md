@@ -1,10 +1,11 @@
 # Environment infrastructure
 
 This root composes [raw storage](../modules/storage/README.md),
-[BigQuery](../modules/bigquery/README.md) and [runtime IAM](../modules/iam/README.md).
+[BigQuery](../modules/bigquery/README.md), [runtime IAM](../modules/iam/README.md)
+and [webhook secret](../modules/secrets/README.md).
 The bucket and dataset receive the same `region`. Only DEV environment files are
-supplied. It creates nine resources by default: one bucket, one dataset, three
-empty native tables, one runtime service account and three IAM members.
+supplied. It creates eleven resources by default: one bucket, one dataset, three
+empty native tables, one runtime service account, one secret and four IAM members.
 An explicit non-PROD `developer_principal` adds one service-account IAM member.
 
 ## Configuration
@@ -18,7 +19,7 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
   state. [CLI workspaces](https://developer.hashicorp.com/terraform/cli/workspaces)
   do not provide that separation. Use the default workspace, not a workspace
   per environment; use a separate working directory for each environment.
-- Standard labels are applied to the bucket, dataset and all tables.
+- Standard labels are applied to the bucket, dataset, all tables and secret.
 - DEV allows bucket/dataset contents to be destroyed and disables Terraform
   table deletion protection. Future PROD variables must reverse those flags.
 - No dataset default table expiration is set. Raw objects expire after 30 days
@@ -26,8 +27,11 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
 - Runtime IAM uses bucket-scoped Object User, dataset-scoped Data Editor and
   project-scoped Job User. Developer impersonation defaults to disabled and is
   never granted in PROD. See [security checks](../docs/security.md).
-- `ext_ookla_raw` is deferred until following steps. No network, app, scheduler,
-  secrets or CI resources are part of current implementation.
+- The `alert-telegram` secret has user-managed replication in `region` and a
+  secret-scoped runtime accessor grant. No versions or values are in Terraform;
+  follow [manual provisioning and verification](../docs/security.md).
+- `ext_ookla_raw` is deferred until following steps. No network, app, scheduler
+  or CI resources are part of current implementation.
 
 ## Prerequisites and authentication
 
@@ -42,12 +46,14 @@ Do not run apply until you have reviewed the plan.
    Your user needs permission to impersonate it. The service account needs
    object access on the ops state bucket and permissions to manage DEV buckets,
    datasets and tables, plus service-account creation and IAM get/set permissions
-   for the runtime grants. Scope grants to the intended resources where possible;
+   for the runtime grants, plus secret creation and secret IAM management.
+   Scope grants to the intended resources where possible;
    bucket/dataset creation also needs the corresponding project permissions.
 3. Set `$sa` to that account's email (do not use a key file), then authenticate:
 
    ```powershell
    $sa = Read-Host 'Existing Terraform service account email'
+   if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
    gcloud auth login
    gcloud auth application-default login --impersonate-service-account=$sa
    ```
@@ -68,13 +74,21 @@ terraform fmt -check -recursive infra
 terraform fmt -check -recursive modules
 terraform -chdir=infra validate
 terraform -chdir=infra test
+& .\infra\tests\check-secret-plan.ps1
 ```
 
-Expected: valid configuration and `18 passed, 0 failed`. Tests mock Google:
+Expected: valid configuration and `21 passed, 0 failed`. Tests mock Google:
 they check naming, schemas, labels, partition filters, retention, destroy flags
 and input validation. They do not prove deployed resources or API behavior.
 Negative tests include reversed/out-of-range/zero-area boxes, malformed quarters,
 quarters earlier than 2023 Q3 and zero retention.
+
+The [secret plan check](tests/check-secret-plan.ps1) also inspects the JSON plan
+from the secrets mock-provider test and rejects any
+`google_secret_manager_secret_version` resource, including resources in child
+modules. It fails if Terraform fails or does not emit exactly one test plan.
+Expected: `PASS: secrets mock plan contains no google_secret_manager_secret_version resources.`
+The script does not print plan values.
 
 ## DEV plan and apply
 
@@ -85,11 +99,12 @@ terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
 Expected workspace: `default`. For a fresh DEV state with the default null
-developer principal, expect **9 to add, 0 to
+developer principal, expect **11 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
 touches bootstrap, another environment, or includes network resources.
-If already applied without drift, expect only four IAM/service-account
-additions. For optional developer impersonation, follow (../docs/security.md).
+If previous plans were already applied without drift, expect only two secret-related
+additions. Preserve any configured developer principal on subsequent plans;
+see [security instructions](../docs/security.md).
 Review it before applying:
 
 ```powershell

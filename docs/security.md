@@ -13,6 +13,7 @@ permissions and must be checked separately.
 | `ingest-runtime@<project_id>.iam.gserviceaccount.com` | `roles/storage.objectUser` | Environment raw bucket only | Create, read, list and replace raw objects. Replacement after an ETag change requires `storage.objects.delete` as well as create. Reads also support external-table queries. |
 | Same runtime | `roles/bigquery.dataEditor` | Environment `network_perf` dataset only | Populate native tables, maintain the load log and later create the external table. Does not grant project-level dataset creation. |
 | Same runtime | `roles/bigquery.jobUser` | Environment project | Submit query jobs (`bigquery.jobs.create`); jobs belong to projects, so this cannot be a dataset grant. Data access remains separately scoped. |
+| Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
 | Explicit `developer_principal` | `roles/iam.serviceAccountTokenCreator` | That runtime service account only, non-PROD | Local keyless impersonation; absent by default (`null`) and always absent in PROD. |
 
 No basic roles are granted. `objectCreator` plus `objectViewer` is intentionally
@@ -42,11 +43,10 @@ terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -out=dev.tfplan
 ```
 
-If action is already applied without other drift, expect **5 additions**:
-one service account and four IAM members. With the default null principal,
-expect **4 additions**, with no developer impersonation grant. A fresh deployment
-including storage/BigQuery has 10 or 9 additions respectively. Review any
-unrelated changes before applying.
+For a fresh deployment, expect 12 additions with the developer grant, or 11
+with the default null principal. If previous plans were already applied without
+drift, new apply adds only two resources: a secret container and its IAM member.
+Review any unrelated changes before applying.
 
 ```powershell
 terraform -chdir=infra apply dev.tfplan
@@ -148,6 +148,46 @@ Tests mock Google and run plan-only checks; they never create cloud resources.
 They cover exact runtime role scopes, null defaults, explicit DEV/TEST
 impersonation, suppressed PROD impersonation, absence of basic roles across all
 four configured IAM grant types and rejection of `allUsers`.
+
+## Alert Telegram secret
+
+Ookla Open Data is public: source listing and reads need no credentials.
+The only application secret is the Telegram alert configuration in
+`alert-telegram`, stored as one JSON object:
+`{"bot_token":"<BotFather token>","chat_id":"<numeric chat id>"}`.
+The bot token is a credential: anyone holding it can act as the bot. Never commit,
+paste into CLI arguments/history, print, log, put in tfvars or ordinary CI
+variables, or pass it through Terraform. The chat ID is not a credential, but it is
+stored with the token so that the runtime reads one secret.
+
+The default implementation creates no versions. The optional write-only
+Terraform version path is not implemented; see [the module trade-off](../modules/secrets/README.md).
+There is no secret-reading Terraform data source, so manual payloads never enter
+Terraform state. A token-free state does not prove there were no leaks in other
+systems, earlier state versions or logs.
+
+The Telegram Bot API puts the token in the request URL
+(`https://api.telegram.org/bot<token>/...`). Error messages, HTTP traces and
+proxy logs can therefore expose it. The runbook scripts suppress error details
+and print only the HTTP status. Future application code must do the same: never
+log request URLs or raw exceptions from Telegram calls.
+
+Version uploads need `secretmanager.versions.add`, which the runtime
+intentionally lacks. Use your own authorized account or an existing provisioning
+identity. This configuration grants neither.
+
+Procedures (PowerShell 7) are in [the runbook](runbook.md#telegram-alert-secret):
+
+- add a version;
+- test it as the runtime SA, including a check that the token is not in Terraform state, and a `sendMessage`;
+- rotate the token.
+
+Mock tests cannot verify these live properties. Negative local test:
+`$sa = ''; if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }`
+must throw before any impersonated command. The secrets mock test checks the
+exact secret-scoped role and identity, without reading any value.
+[check-secret-plan.ps1](../infra/tests/check-secret-plan.ps1) fails if a
+secret version ever appears in the plan.
 
 ## References
 

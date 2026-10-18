@@ -10,6 +10,7 @@ TODO: Document the architecture that is implemented and verified.
 - Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
 - DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
 - Runtime IAM configuration: dedicated ingestion service account, raw-bucket Object User, dataset Data Editor and project Job User. Optional developer impersonation is disabled by default and never granted in PROD. Local mock tests cover these rules; live permission checks remain unverified. See [security and verification](docs/security.md).
+- Telegram alert secret container configuration (`alert-telegram`, JSON `{bot_token, chat_id}`): regional user-managed replication, standard labels and secret-scoped runtime access. No secret values or versions are managed by Terraform. Local validation/mock tests pass; live access, token-free cloud state and message delivery remain unverified. Manual add/test/rotate procedures: [runbook](docs/runbook.md).
 
 ## Environments
 TODO: Document the available environments and their configuration.
@@ -31,7 +32,8 @@ TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
 - `ext_ookla_raw` (deferred until raw files exist), ingestion, transformations and populated marts.
-- Networking, secrets, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration and a Terraform deployment identity.
+- Networking, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration and a Terraform deployment identity.
+- Provisioned Telegram secret values, automated alerts, automated token rotation and the optional Terraform write-only secret-version path.
 - Verified DEV deployment. No dataset default table expiration is configured.
 
 ## Data attribution

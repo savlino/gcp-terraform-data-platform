@@ -27,3 +27,12 @@ module "iam" {
   dataset_id          = module.bigquery.dataset_id
   developer_principal = var.developer_principal
 }
+
+module "secrets" {
+  source = "../modules/secrets"
+
+  project_id       = var.project_id
+  env              = var.env
+  region           = var.region
+  runtime_sa_email = module.iam.service_account_email
+}

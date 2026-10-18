@@ -163,7 +163,7 @@ data provider's documentation and shaped the design.
 - Mutation check: temporarily changing `objectUser` to `objectCreator` made the test fail, which proves
   the assertion works.
 - Limitation: a test asserts on named resources only and cannot enumerate every IAM resource in a plan;
-  a plan-JSON scan in CI is planned for step 11.
+  a plan-JSON scan in CI is planned.
 - **Docs:** https://developer.hashicorp.com/terraform/language/tests
 
 ## Repository and mirroring

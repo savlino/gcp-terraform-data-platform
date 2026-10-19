@@ -4,13 +4,15 @@
 TODO: Describe the project's purpose and scope.
 
 ## Architecture
-TODO: Document the architecture that is implemented and verified.
+See [application architecture](docs/architecture.md) for the implemented raw-ingestion flow and deferred stages.
+The source is public AWS S3 in `us-west-2`, destination storage is configured in GCP `europe-southwest1`, and cross-cloud transfer uses public HTTPS without AWS credentials.
 
 ## What is implemented
 - Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
 - DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
 - Runtime IAM configuration: dedicated ingestion service account, raw-bucket Object User, dataset Data Editor and project Job User. Optional developer impersonation is disabled by default and never granted in PROD. Local mock tests cover these rules; live permission checks remain unverified. See [security and verification](docs/security.md).
 - Telegram alert secret container configuration (`alert-telegram`, JSON `{bot_token, chat_id}`): regional user-managed replication, standard labels and secret-scoped runtime access. No secret values or versions are managed by Terraform. Local validation/mock tests pass; live access, token-free cloud state and message delivery remain unverified. Manual add/test/rotate procedures: [runbook](docs/runbook.md).
+- Raw ingestion CLI: paginated public S3 discovery, source-footer schema checks, bounded streaming to GCS, ETag/custom-metadata incremental decisions, dry-run and optional local impersonation. Unit tests and Ruff pass locally on Python 3.14; Python 3.12 and live transfers remain unverified. See [app configuration](app/README.md) and [DEV verification](docs/runbook.md#raw-ingestion).
 
 ## Environments
 TODO: Document the available environments and their configuration.
@@ -31,7 +33,7 @@ TODO: Document verified cost controls and teardown steps.
 TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
-- `ext_ookla_raw` (deferred until raw files exist), ingestion, transformations and populated marts.
+- `ext_ookla_raw` (deferred until raw files exist), `load_log`-driven transformations, region filtering and populated marts.
 - Networking, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration and a Terraform deployment identity.
 - Provisioned Telegram secret values, automated alerts, automated token rotation and the optional Terraform write-only secret-version path.
 - Verified DEV deployment. No dataset default table expiration is configured.

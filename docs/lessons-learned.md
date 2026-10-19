@@ -7,6 +7,17 @@ data provider's documentation and shaped the design.
 
 ## Local environment (Windows, PowerShell)
 
+### Limited sync runs do not define a fixed idempotence sample
+- **What happened:** repeating `sync --limit 1` with a backlog can select the next
+  pending object, making a successful skip look like a repeated transfer.
+- **Fix:** use an exact scope such as `sync --type mobile --quarter 2023-Q3`.
+  `--limit N` limits transfers per run; up-to-date files do not count.
+- **Takeaway:** verify that the same object's GCS `generation` is unchanged across
+  the repeat run. A content overwrite creates a new generation; metadata-only
+  updates change `metageneration`, not the content generation. A transfer count
+  alone is not strict evidence that a particular object was not overwritten.
+- **Docs:** https://cloud.google.com/storage/docs/metadata#generation-number
+
 ### "Python was not found" printed by gcloud
 - **What happened:** every `gcloud` call printed a Microsoft Store message. Windows ships stub
   `python.exe` / `python3.exe` aliases in `%LOCALAPPDATA%\Microsoft\WindowsApps`; a regular Python

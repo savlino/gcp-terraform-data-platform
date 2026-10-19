@@ -196,5 +196,130 @@ SLA. Check BotFather's reply when you rotate.
    Optional and irreversible: once you are sure, run
    `gcloud secrets versions destroy <N> --secret=alert-telegram --project dep-2610-dev`.
 
-Cloud Run (step 7) must read `latest`. If a job pins a version number, redeploy
+Cloud Run must read `latest`. If a job pins a version number, redeploy
 it with `M` before disabling `N`.
+
+## Raw ingestion
+
+The app compares S3 ETags with **GCS custom metadata**, not `load_log`.
+No BigQuery queries, region filtering or transformations are performed yet.
+Public source files are global and potentially large; review the printed byte
+counts and costs before copying even a single quarter. Source ETags are opaque
+identifiers, not MD5 checksums.
+
+### Local configuration and preview
+
+**PowerShell 7 on Windows**, repository root, after installing
+[the app](../app/README.md#install-and-local-checks). Do not use keys.
+The DEV raw bucket and runtime IAM must already be applied, including the
+developer's Token Creator grant. Use user ADC as the source for explicit
+application impersonation; Terraform deployment ADC may need to be restored
+before subsequent Terraform operations.
+
+```powershell
+gcloud auth application-default login
+$sa = terraform -chdir=infra output -raw runtime_service_account_email
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read runtime SA output.' }
+if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
+$env:IMPERSONATE_SERVICE_ACCOUNT = $sa
+$env:PROJECT_ID = 'dep-2610-dev'
+$env:RAW_BUCKET = 'dep-2610-dev-raw'
+$env:S3_REGION = 'us-west-2'
+$env:MIN_QUARTER = '2023-Q3'
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --dry-run
+if ($LASTEXITCODE -ne 0) { throw 'Preview failed.' }
+```
+
+Expected: JSON plan logs with source/destination paths, sizes and reasons,
+without writes. Select an available quarter at or after `MIN_QUARTER` to keep
+the test scope fixed:
+
+```powershell
+$quarter = '2023-Q3'
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter --dry-run
+if ($LASTEXITCODE -ne 0) { throw 'Narrowed preview failed.' }
+```
+
+The exact-quarter filter excludes other quarters even when they are pending.
+`--limit N` limits transfers per run; up-to-date files do not count.
+
+### First copy, repeat and metadata
+
+```powershell
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter
+if ($LASTEXITCODE -ne 0) { throw 'First sync failed.' }
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter
+if ($LASTEXITCODE -ne 0) { throw 'Repeat sync failed.' }
+```
+
+Expected in a previously empty single-object scope: first run transfers one,
+second reports `0 pending` and `transferred=0`. If already synced, both transfer
+zero. Logs must show a successful footer check path before the upload; schema
+errors fail before GCS writes. The app never prints source row data.
+
+Copy the exact destination URI from the plan log:
+
+```powershell
+$object = Read-Host 'Exact gs://dep-2610-dev-raw/ookla/... Parquet object URI'
+if (-not $object.StartsWith('gs://dep-2610-dev-raw/ookla/')) {
+  throw 'Use only the DEV Ookla object from this test.'
+}
+gcloud storage objects describe $object --format='json(size,metadata,generation,metageneration)' --impersonate-service-account=$sa
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect object metadata.' }
+```
+
+Expected custom metadata: `source_etag` equals the source listing ETag without
+HTTP quotes; `source_size` equals object size and source Content-Length.
+
+Check the strict no-overwrite signal for this exact object:
+
+```powershell
+$before = gcloud storage objects describe $object --format='value(generation)' --impersonate-service-account=$sa
+if ($LASTEXITCODE -ne 0 -or -not $before) { throw 'Cannot read generation before sync.' }
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter
+if ($LASTEXITCODE -ne 0) { throw 'Idempotence sync failed.' }
+$after = gcloud storage objects describe $object --format='value(generation)' --impersonate-service-account=$sa
+if ($LASTEXITCODE -ne 0 -or -not $after) { throw 'Cannot read generation after sync.' }
+if ($before -ne $after) { throw 'Object generation changed: content was overwritten.' }
+```
+
+Expected: `transferred=0` and identical content generations. Metadata-only edits
+change metageneration rather than generation. Keep `$object` and `$quarter`
+aligned throughout these checks.
+
+### Force a changed-ETag decision (DEV only)
+
+This intentionally changes only the test object's metadata, not real source
+data or BigQuery. Object User includes the necessary update permission.
+
+```powershell
+gcloud storage objects update $object --update-custom-metadata=source_etag=synthetic-etag-mismatch --impersonate-service-account=$sa
+if ($LASTEXITCODE -ne 0) { throw 'Metadata update failed.' }
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter --dry-run
+if ($LASTEXITCODE -ne 0) { throw 'Changed-ETag preview failed.' }
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --quarter $quarter
+if ($LASTEXITCODE -ne 0) { throw 'Changed-ETag resync failed.' }
+```
+
+Expected: exactly that object becomes pending with `etag_changed`; resync
+overwrites it and restores the actual source ETag metadata. The next run
+transfers nothing in the same single-object scope. Do **not** edit `load_log`:
+it has no role in decisions.
+
+### Negative and offline checks
+
+```powershell
+& app\.venv\Scripts\python.exe -m pytest app\tests\unit -q
+& app\.venv\Scripts\python.exe -m ruff check app
+& app\.venv\Scripts\python.exe -m ruff format --check app
+& app\.venv\Scripts\python.exe -m ingest sync --type mobile --limit 0
+if ($LASTEXITCODE -eq 0) { throw 'Invalid zero limit was accepted.' }
+```
+
+Expected: unit tests green, Ruff clean, and zero limit rejected with non-zero
+exit code before any network calls. Unit tests also verify that a synthetic
+Parquet file missing `devices` fails before transfer, interrupted transfers
+abort, and unchanged/changed ETag decisions are idempotent.
+
+Live transfer, Cloud Run execution and regional source coverage have not been
+verified by the assistant. Only local mocked tests were run.

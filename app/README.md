@@ -3,8 +3,10 @@
 Python src-layout application: `python -m ingest sync --type mobile|fixed|all`.
 The default schema path resolves from the source checkout, independently of the
 working directory. The examples below run from the **repository root**.
-Only the raw sync stage is implemented: no BigQuery client, `load_log` access,
-transform, region filtering, alerts or application container is added here.
+The sync command handles raw files only. The separate
+[`build` command](BUILD.md) performs regional transforms, staged quality checks,
+transactional publication, mart rebuilds and Telegram summaries. No application
+container is implemented yet.
 
 ## Configuration
 

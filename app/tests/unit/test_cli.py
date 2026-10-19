@@ -275,3 +275,80 @@ def test_unavailable_quarter_fails(environment, monkeypatch, source):
     _, transfer, _ = setup_cli(monkeypatch, source, ["--type", "mobile", "--quarter", "2025-Q1"])
     assert cli.main() == 1
     transfer.assert_not_called()
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_build_cli_flags_credentials_and_alert_gating(environment, monkeypatch, dry_run):
+    args = ["ingest", "build", "--type", "fixed", "--quarter", "2023-Q3", "--force"]
+    if dry_run:
+        args.append("--dry-run")
+    monkeypatch.setattr("sys.argv", args)
+    credentials = MagicMock()
+    monkeypatch.setattr(cli, "application_credentials", lambda config: credentials)
+    gcs, bq, operation, alert = MagicMock(), MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(cli.storage, "Client", gcs)
+    monkeypatch.setattr(cli.bigquery, "Client", bq)
+    monkeypatch.setattr(cli, "build", operation)
+    monkeypatch.setattr(cli, "notify", alert)
+    assert cli.main() == 0
+    assert operation.call_args.args[-4:] == ("fixed", (2023, 3), True, dry_run)
+    assert gcs.call_args.kwargs["credentials"] is credentials
+    assert bq.call_args.kwargs["credentials"] is credentials
+    assert alert.call_count == (0 if dry_run else 1)
+
+
+def test_failed_build_returns_nonzero_and_sends_failure_summary(environment, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ingest", "build"])
+    monkeypatch.setattr(cli, "application_credentials", lambda config: MagicMock())
+    monkeypatch.setattr(cli.storage, "Client", MagicMock())
+    monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
+    monkeypatch.setattr(cli, "build", MagicMock(side_effect=ValueError("DQ failed")))
+    alert = MagicMock()
+    monkeypatch.setattr(cli, "notify", alert)
+    assert cli.main() == 1
+    assert "FAILED" in alert.call_args.args[-1]
+    assert "type=all" in alert.call_args.args[-1]
+    assert "quarter=all" in alert.call_args.args[-1]
+    assert "rule=build_setup_or_discovery" in alert.call_args.args[-1]
+
+
+def test_cli_sends_safe_partition_failure_context(environment, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ingest", "build", "--type", "all"])
+    monkeypatch.setattr(cli, "application_credentials", lambda config: MagicMock())
+    monkeypatch.setattr(cli.storage, "Client", MagicMock())
+    monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
+    error = cli.BuildError("fixed", "2024-Q2", "invalid_devices(3)")
+    monkeypatch.setattr(cli, "build", MagicMock(side_effect=error))
+    alert = MagicMock()
+    monkeypatch.setattr(cli, "notify", alert)
+    assert cli.main() == 1
+    assert alert.call_args.args[-1] == error.notification
+
+
+def test_startup_logs_effective_configuration_without_secrets(environment, monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["ingest", "build", "--dry-run"])
+    monkeypatch.setenv("MAXIMUM_BYTES_BILLED", "123456789")
+    monkeypatch.setenv("BOT_TOKEN", "synthetic-token-must-not-be-logged")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", "private-credential-path")
+
+    def credentials(config):
+        output = capsys.readouterr().err
+        records = [json.loads(line) for line in output.splitlines()]
+        message = next(
+            record["message"]
+            for record in records
+            if record["message"].startswith("Effective configuration: ")
+        )
+        effective = json.loads(message.removeprefix("Effective configuration: "))
+        assert effective["maximum_bytes_billed"] == 123456789
+        assert effective["project_id"] == "dep-2610-dev"
+        assert effective["dry_run"] is True
+        assert "synthetic-token-must-not-be-logged" not in output
+        assert "private-credential-path" not in output
+        return MagicMock()
+
+    monkeypatch.setattr(cli, "application_credentials", credentials)
+    monkeypatch.setattr(cli.storage, "Client", MagicMock())
+    monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
+    monkeypatch.setattr(cli, "build", MagicMock())
+    assert cli.main() == 0

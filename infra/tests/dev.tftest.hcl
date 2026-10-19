@@ -18,8 +18,8 @@ run "dev_plan" {
   }
 
   assert {
-    condition     = toset(keys(output.table_ids)) == toset(["ookla_tiles", "load_log", "mart_quarterly_performance"])
-    error_message = "Only the three native tables belong so far."
+    condition     = toset(keys(output.table_ids)) == toset(["ookla_tiles", "load_log", "mart_quarterly_performance", "ext_ookla_raw"])
+    error_message = "The dataset must expose three native tables and the raw external table."
   }
 }
 

@@ -14,6 +14,7 @@ module "bigquery" {
   project_id                 = var.project_id
   env                        = var.env
   location                   = var.region
+  raw_bucket_name            = module.storage.raw_bucket_name
   deletion_protection        = var.deletion_protection
   delete_contents_on_destroy = var.delete_contents_on_destroy
 }

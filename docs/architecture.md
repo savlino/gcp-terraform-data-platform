@@ -71,15 +71,35 @@ project-scoped Job User and access to the configured alert secret only.
 The sync command currently uses only storage access; it does not read the secret.
 See [security](security.md) for scope details and impersonation restrictions.
 
-## Not implemented in the application
+## Curated build pipeline
 
-BigQuery external-table creation, `load_log` processing, regional filtering,
-native-table transforms, mart aggregation, data-quality checks and Telegram
-alerts are deferred. Terraform defines the native table schemas and secret
-container, but sync neither populates these tables nor sends notifications.
+Terraform defines `ext_ookla_raw` with Parquet autodetection, typed CUSTOM Hive
+partitions and a required Hive partition filter. Raw files must exist for
+schema inference; live creation and mixed-schema queries remain unverified.
+The sync application does not create or query the external table.
+
+The separate `build` command compares GCS `source_etag` metadata with the latest
+successful load-log row, with optional type/quarter selection and forced rebuild.
+A parameterized query filters the external Hive partition, file URI and bbox
+into a one-day staging table. Quality checks run before any curated mutation.
+A transaction replaces only that type/quarter in `ookla_tiles` and updates its
+watermark; it never truncates a shared quarter partition.
+
+A second transaction rebuilds the whole mart with test-weighted averages,
+latency-outlier exclusion and QoQ comparisons only between adjacent quarters.
+It runs even without changed raw ETags to recover a previously failed mart build.
+Telegram summaries use the JSON secret and Bot API without logging credential-
+bearing URLs or notification exception text. Notification failures are warnings.
+Build dry-run reads watermarks but performs no data writes or notifications.
+See [build behavior and recovery](../app/BUILD.md) for thresholds, transaction
+boundaries and single-writer limitations. This path has local test coverage,
+not verified live BigQuery execution.
+
+## Not implemented
+
 Cloud Run execution, scheduling, custom networking and CI/CD are also not
-implemented. Raw files are global; bounding-box configuration does not yet
-reduce transferred data.
+implemented. Raw files are global; regional filtering applies during the build
+and does not reduce the global source transfer.
 
 See the [runbook](runbook.md#raw-ingestion) for manual DEV verification
 and [lessons learned](lessons-learned.md) for idempotence-test pitfalls.

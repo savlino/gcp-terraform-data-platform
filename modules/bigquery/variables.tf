@@ -18,9 +18,14 @@ variable "location" {
   description = "Dataset location; must match the raw bucket."
 }
 
+variable "raw_bucket_name" {
+  type        = string
+  description = "Raw bucket name from the storage module, without gs://."
+}
+
 variable "deletion_protection" {
   type        = bool
-  description = "Prevent Terraform from destroying native tables."
+  description = "Prevent Terraform from destroying native and external tables."
   default     = true
 }
 

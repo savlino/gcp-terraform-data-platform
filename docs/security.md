@@ -43,7 +43,7 @@ terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -out=dev.tfplan
 ```
 
-For a fresh deployment, expect 12 additions with the developer grant, or 11
+For a fresh deployment, expect 13 additions with the developer grant, or 12
 with the default null principal. If previous plans were already applied without
 drift, new apply adds only two resources: a secret container and its IAM member.
 Review any unrelated changes before applying.

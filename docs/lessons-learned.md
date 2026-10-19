@@ -194,5 +194,6 @@ data provider's documentation and shaped the design.
 - Past quarters can be re-aggregated (privacy requests), so loads compare the source ETag, not just
   the quarter.
 - Supported regions changed in April 2026; availability of the target region is checked before loading.
-- Extreme latency values exist in the source; they are flagged and excluded from the mart, not deleted.
+- Extreme latency values exist in the source; they are flagged and excluded only from their own
+  mart latency average. Speeds and counts retain all tiles; curated values are not deleted.
 - **Docs:** https://github.com/teamookla/ookla-open-data

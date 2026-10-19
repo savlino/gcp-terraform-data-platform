@@ -8,6 +8,8 @@ See [application architecture](docs/architecture.md) for the implemented raw-ing
 The source is public AWS S3 in `us-west-2`, destination storage is configured in GCP `europe-southwest1`, and cross-cloud transfer uses public HTTPS without AWS credentials.
 
 ## What is implemented
+- Build CLI configuration and code: GCS/load-log ETag selection, regional staged transforms, quality gates, transactional type/quarter replacement, full weighted mart rebuild and token-safe Telegram summaries. Local tests pass; BigQuery execution and live alerts remain unverified. See [build configuration and guarantees](app/BUILD.md).
+- Terraform configuration for `ext_ookla_raw`: autodetected Parquet with typed CUSTOM Hive partitions over the raw bucket and a required partition filter. Provider validation and mock tests pass; cloud creation and queries remain unverified.
 - Bootstrap Terraform configuration is checked in and passes local `terraform validate`; cloud resources have not been applied or verified.
 - DEV infrastructure configuration: private raw bucket, `network_perf` dataset and three empty native table definitions. Local validation and mocked Terraform tests pass; DEV plan/apply and cloud behavior remain unverified. See [deployment and verification commands](infra/README.md).
 - Runtime IAM configuration: dedicated ingestion service account, raw-bucket Object User, dataset Data Editor and project Job User. Optional developer impersonation is disabled by default and never granted in PROD. Local mock tests cover these rules; live permission checks remain unverified. See [security and verification](docs/security.md).
@@ -33,9 +35,9 @@ TODO: Document verified cost controls and teardown steps.
 TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
-- `ext_ookla_raw` (deferred until raw files exist), `load_log`-driven transformations, region filtering and populated marts.
+- Verified populated curated tables/marts and live transformation/quality behavior.
 - Networking, Cloud Run scheduling and CI/CD; TEST/PROD environment configuration and a Terraform deployment identity.
-- Provisioned Telegram secret values, automated alerts, automated token rotation and the optional Terraform write-only secret-version path.
+- Verified Telegram delivery, provisioned secret values, automated token rotation and the optional Terraform write-only secret-version path.
 - Verified DEV deployment. No dataset default table expiration is configured.
 
 ## Data attribution

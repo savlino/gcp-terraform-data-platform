@@ -4,8 +4,8 @@ This root composes [raw storage](../modules/storage/README.md),
 [BigQuery](../modules/bigquery/README.md), [runtime IAM](../modules/iam/README.md)
 and [webhook secret](../modules/secrets/README.md).
 The bucket and dataset receive the same `region`. Only DEV environment files are
-supplied. It creates eleven resources by default: one bucket, one dataset, three
-empty native tables, one runtime service account, one secret and four IAM members.
+supplied. It creates twelve resources by default: one bucket, one dataset, three
+native tables, one external table, one runtime service account, one secret and four IAM members.
 An explicit non-PROD `developer_principal` adds one service-account IAM member.
 
 ## Configuration
@@ -30,7 +30,8 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
 - The `alert-telegram` secret has user-managed replication in `region` and a
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
-- `ext_ookla_raw` is deferred until following steps. No network, app, scheduler
+- `ext_ookla_raw` uses Parquet autodetection and typed CUSTOM Hive partitions.
+  Raw Parquet files must exist before applying this table. No network, app, scheduler
   or CI resources are part of current implementation.
 
 ## Prerequisites and authentication
@@ -99,11 +100,11 @@ terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
 Expected workspace: `default`. For a fresh DEV state with the default null
-developer principal, expect **11 to add, 0 to
+developer principal, expect **12 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
 touches bootstrap, another environment, or includes network resources.
-If previous plans were already applied without drift, expect only two secret-related
-additions. Preserve any configured developer principal on subsequent plans;
+If the previous infrastructure is already applied without drift, expect only one
+external-table addition. Preserve any configured developer principal on subsequent plans;
 see [security instructions](../docs/security.md).
 Review it before applying:
 
@@ -123,16 +124,34 @@ checks have not been run by the assistant.
 gcloud storage buckets describe gs://dep-2610-dev-raw --impersonate-service-account=$sa
 bq --impersonate_service_account=$sa --format=prettyjson show dep-2610-dev:network_perf
 bq --impersonate_service_account=$sa ls dep-2610-dev:network_perf
-foreach ($table in 'ookla_tiles', 'load_log', 'mart_quarterly_performance') {
+foreach ($table in 'ookla_tiles', 'load_log', 'mart_quarterly_performance', 'ext_ookla_raw') {
   bq --impersonate_service_account=$sa --format=prettyjson show "dep-2610-dev:network_perf.$table"
 }
 ```
 
 Expected: raw bucket in `EUROPE-SOUTHWEST1`, uniform access, public access
 prevention enforced, 30-day delete rule; dataset in the same region without
-`defaultTableExpirationMs`; exactly the three native tables, initially empty.
+`defaultTableExpirationMs`; three native tables and `ext_ookla_raw`.
 Curated and mart tables have DAY partitioning on `quarter_start` with
 `requirePartitionFilter: true`. The load log is unpartitioned.
+
+The external table must show PARQUET, autodetection, the raw source URI and
+CUSTOM Hive options with `requirePartitionFilter: true`. To verify in GCP,
+use a quarter already uploaded to raw storage:
+
+```powershell
+$sql = 'SELECT quadkey FROM `dep-2610-dev.network_perf.ext_ookla_raw` WHERE type = ''mobile'' AND year = 2023 AND quarter = 3 LIMIT 1'
+bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 query --use_legacy_sql=false --maximum_bytes_billed=1073741824 $sql
+if ($LASTEXITCODE -ne 0) { throw 'Filtered external query failed.' }
+$sql = 'SELECT quadkey FROM `dep-2610-dev.network_perf.ext_ookla_raw` LIMIT 1'
+bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 query --use_legacy_sql=false --maximum_bytes_billed=1073741824 $sql
+if ($LASTEXITCODE -eq 0) { throw 'External query without a partition filter was accepted.' }
+```
+
+The negative query must fail for a missing Hive partition filter, not permissions,
+schema incompatibility or a billing cap. Each query is capped at 1 GiB billed;
+LIMIT does not itself bound scanned bytes. Mixed physical Parquet types across
+quarters are not normalized by autodetection and remain a cloud-verification risk.
 
 Positive partition-filter query (empty result is expected before ingestion):
 

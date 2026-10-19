@@ -323,3 +323,102 @@ abort, and unchanged/changed ETag decisions are idempotent.
 
 Live transfer, Cloud Run execution and regional source coverage have not been
 verified by the assistant. Only local mocked tests were run.
+
+## Curated build (step 06)
+
+Commands are **PowerShell 7 on Windows**, repository root. Reuse the raw-ingestion
+environment and impersonation setup above. Raw GCS objects must have sync
+metadata, Terraform tables (including the external table) must exist, and the
+Telegram JSON version must be provisioned for delivery checks. No new roles are
+needed beyond the configured runtime grants.
+
+Install the updated declared dependencies, then configure the build:
+
+```powershell
+& app\.venv\Scripts\python.exe -m pip install -e 'app[dev]'
+$env:REGION = 'europe-southwest1'
+$env:REGION_BBOX = '{"min_lon":-9.6,"max_lon":4.4,"min_lat":35.8,"max_lat":43.9}'
+$env:MAXIMUM_BYTES_BILLED = '10737418240'
+$env:MINIMUM_ROW_PERCENT = '50'
+$env:LATENCY_CEILING_MS = '10000'
+$env:MART_ZOOM = '10'
+& app\.venv\Scripts\python.exe -m ingest build --type mobile --quarter 2023-Q3 --dry-run
+if ($LASTEXITCODE -ne 0) { throw 'Build work preview failed.' }
+```
+
+The preview performs a capped watermark query and metadata reads, not mutations
+or notifications. Confirm the selected quarter exists in raw and the dataset
+and bbox match Terraform. Then run:
+
+```powershell
+& app\.venv\Scripts\python.exe -m ingest build --type mobile --quarter 2023-Q3
+if ($LASTEXITCODE -ne 0) { throw 'Build failed; inspect DQ and transaction logs.' }
+```
+
+Expected: stage/DQ/publication success, mart rebuild, a successful load-log row,
+and a Telegram summary. A notification warning does not mean data processing
+failed; verify channel arrival separately. There must be no token or Bot API URL
+in logs. A second unchanged run selects no partitions but rebuilds the mart.
+Operational `loaded_at` values may change; counts and metrics must not.
+
+### Exact rerun and network-type preservation
+
+Compare native row counts around a forced mobile-only rebuild. The fixed count
+must not change because both types share the same date partition.
+
+```powershell
+$sa = $env:IMPERSONATE_SERVICE_ACCOUNT
+if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
+$counts = 'SELECT network_type, COUNT(*) AS rows FROM `dep-2610-dev.network_perf.ookla_tiles` WHERE quarter_start = DATE ''2023-07-01'' GROUP BY network_type ORDER BY network_type'
+$before = bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 --format=json query --use_legacy_sql=false --maximum_bytes_billed=10737418240 $counts
+if ($LASTEXITCODE -ne 0) { throw 'Count baseline failed.' }
+& app\.venv\Scripts\python.exe -m ingest build --type mobile --quarter 2023-Q3 --force
+if ($LASTEXITCODE -ne 0) { throw 'Forced rebuild failed.' }
+$after = bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 --format=json query --use_legacy_sql=false --maximum_bytes_billed=10737418240 $counts
+if ($LASTEXITCODE -ne 0) { throw 'Count comparison failed.' }
+if (($before -join "`n") -ne ($after -join "`n")) { throw 'Counts changed on identical source/configuration.' }
+```
+
+Keep SQL, thresholds, bbox and source constant during this comparison. No
+cross-quarter all-run transaction exists: earlier successful slices remain
+committed if a later slice fails. Run sync/build serially per environment.
+
+### Independent mart calculation
+
+Choose an existing ten-digit mart prefix for that quarter/type. The handwritten
+[verification SQL](../app/src/ingest/sql/verify_mart.sql) computes the expected
+download weighted average, tile count and tests directly from all curated tiles,
+regardless of latency outliers. It does not call the mart rebuild query.
+
+```powershell
+$prefix = Read-Host 'Existing 10-digit quadkey prefix for mobile 2023 Q3'
+if ($prefix -notmatch '^[0-3]{10}$') { throw 'Expected a zoom-10 quadkey prefix.' }
+$sql = (Get-Content app\src\ingest\sql\verify_mart.sql -Raw).Replace('{dataset}', 'dep-2610-dev.network_perf')
+bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 query --use_legacy_sql=false --maximum_bytes_billed=10737418240 '--parameter=quarter_start:DATE:2023-07-01' '--parameter=network_type:STRING:mobile' "--parameter=prefix:STRING:$prefix" $sql
+if ($LASTEXITCODE -ne 0) { throw 'Independent mart calculation failed.' }
+```
+
+Expected: exactly one row, `download_matches=true`, equal expected/mart tile and
+test counts. No rows means the chosen prefix is absent, not a passing check.
+Local numerical tests also cover sparse-latency denominators and NULL QoQ across
+a missing quarter; BigQuery query execution still needs this DEV verification.
+
+### Negative quality and configuration checks
+
+```powershell
+& app\.venv\Scripts\python.exe -m pytest app\tests\unit\test_build_sql.py app\tests\unit\test_quality.py -q
+if ($LASTEXITCODE -ne 0) { throw 'Synthetic quality/preservation tests failed.' }
+& app\.venv\Scripts\python.exe -m ingest build --quarter 2023-Q2 --dry-run
+if ($LASTEXITCODE -eq 0) { throw 'Unsupported quarter was accepted.' }
+```
+
+The synthetic test runs the aggregate quality SQL with SQLite function
+adaptations: `devices > tests` fails, curated rows/load log remain unchanged,
+then a valid transaction changes mobile without changing fixed. This is local
+evidence, not a claim of cloud transaction verification. The invalid quarter
+must fail before cloud access. Never inject bad data into PROD.
+
+If a stage remains after process termination, stop other writers and inspect it
+with the deployment identity; do not blindly delete another run's stage. Its
+one-day expiration is the fallback. If a mart rebuild fails after publication,
+rerun build: even with no selected ETags it attempts the full mart transaction.

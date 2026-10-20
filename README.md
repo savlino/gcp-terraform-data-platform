@@ -8,6 +8,7 @@ See [application architecture](docs/architecture.md) for the implemented raw-ing
 The source is public AWS S3 in `us-west-2`, destination storage is configured in GCP `europe-southwest1`, and cross-cloud transfer uses public HTTPS without AWS credentials.
 
 ## What is implemented
+- Private-network Terraform configuration: custom VPC (`REGIONAL` routing), Private Google Access subnet, explicit logged deny-all ingress (priority 65534, making the implied 65535 deny visible) and the only allow: TCP 22 from the IAP range `35.235.240.0/20` to `iap-ssh` tagged instances. Optional private Shielded/OS Login `e2-micro` demo without an external IP defaults off; developer tunnel/login grants are instance-scoped and excluded from PROD. Cloud Run remains unattached. Local validation and mock tests pass, including a check that no rule allows `0.0.0.0/0`; default-network removal, firewall logging and live SSH verification remain manual. See [network checks and teardown](docs/runbook.md#private-network-and-iap-demo).
 - Scheduled-ingestion Terraform configuration: immutable Artifact Registry tags with one delete policy for untagged versions older than seven days, bounded Cloud Run `run` task in the data region, job-scoped scheduler invocation and weekly OAuth Scheduler in `europe-west1`. Application/DQ settings come from variables; alert secrets are read by API using a resource name. Local validation and mock tests pass; registry push, deployment and live execution remain unverified. See [image-first deployment](docs/runbook.md#scheduled-cloud-run-ingestion). Tagged releases accumulate by design.
 - Non-root Python 3.12 application image with packaged SQL and shared schemas, plus `run` orchestration (sync then build). Local Docker build and offline smoke checks pass; Cloud Run deployment and live combined execution remain unverified. See [container verification](app/README.md#container).
 - Build CLI configuration and code: GCS/load-log ETag selection, regional staged transforms, quality gates, transactional type/quarter replacement, full weighted mart rebuild and token-safe Telegram summaries. Local tests pass; BigQuery execution and live alerts remain unverified. See [build configuration and guarantees](app/BUILD.md).
@@ -39,7 +40,7 @@ TODO: Add verified setup and deployment instructions.
 
 ## What is NOT here
 - Verified populated curated tables/marts and live transformation/quality behavior.
-- Verified Cloud Run/Scheduler deployment and execution, custom networking and CI/CD; TEST/PROD environment files, a Terraform deployment identity and distributed execution locking.
+- Verified Cloud Run/Scheduler and private-network/IAP execution, CI/CD; TEST/PROD environment files, a Terraform deployment identity and distributed execution locking. Cloud Run VPC attachment is intentionally absent.
 - Verified Telegram delivery, provisioned secret values, automated token rotation and the optional Terraform write-only secret-version path.
 - Verified DEV deployment. No dataset default table expiration is configured.
 

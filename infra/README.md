@@ -3,17 +3,30 @@
 This root composes [raw storage](../modules/storage/README.md),
 [BigQuery](../modules/bigquery/README.md), [runtime IAM](../modules/iam/README.md)
 and [Telegram secret](../modules/secrets/README.md), plus
-[scheduled ingestion](../modules/ingest_job/README.md).
+[scheduled ingestion](../modules/ingest_job/README.md) and
+[private networking](../modules/network/README.md).
 The bucket and dataset receive the same `region`. Only DEV environment files are
-supplied. Repository-only setup creates thirteen resources: one bucket, one dataset,
+supplied. Repository-only setup creates seventeen resources: one bucket, one dataset,
 three native tables, one external table, one runtime service account, one secret,
-four IAM members and one Artifact Registry repository. Enabling ingestion adds
+four IAM members, one Artifact Registry repository, a VPC, subnet and two
+firewall rules. Enabling ingestion adds
 four resources: Cloud Run Job, scheduler service account, job-scoped invoker member
 and Scheduler job.
 An explicit non-PROD `developer_principal` adds one service-account IAM member.
+The optional demo adds one VM and, when a non-PROD developer is set, two
+instance-scoped IAM members.
 
 ## Configuration
 
+- `subnet_cidr` defaults by environment when null: DEV `10.10.0.0/24`,
+  TEST `10.20.0.0/24`, PROD `10.30.0.0/24`. DEV tfvars explicitly sets its CIDR.
+- `enable_iap_demo_vm` defaults false; `demo_vm_zone` defaults to `${region}-a`.
+  DEV explicitly uses `europe-southwest1-a`. The European `e2-micro` is billable;
+  enable only for supervised testing and disable/apply immediately afterward.
+  Cloud Run is not attached to this VPC. No NAT or connector is added.
+- The developer gets instance-scoped IAP SSH and OS Login only when the VM is
+  enabled, the principal is set and env is not PROD. An Owner's inherited access
+  does not replace these deliberate grants. See [network runbook](../docs/runbook.md#private-network-and-iap-demo).
 - `scheduler_region` defaults to `europe-west1` independently of `region`.
   It is used only by Scheduler; Cloud Run, Artifact Registry and data remain in Madrid.
   See the [placement decision](../docs/architecture.md#scheduler-region-decision).
@@ -37,8 +50,9 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
   do not provide that separation. Use the default workspace, not a workspace
   per environment; use a separate working directory for each environment.
 - Standard labels are applied to every supporting resource, including the
-  registry, Cloud Run job and executions. Scheduler and service accounts do not
-  support labels in this provider.
+  registry, Cloud Run job/executions, demo VM and boot disk. Scheduler,
+  service accounts, VPC, subnet and firewall resources do not support labels
+  in this provider.
 - DEV allows bucket/dataset contents to be destroyed and disables Terraform
   table deletion protection. Future PROD variables must reverse those flags.
 - No dataset default table expiration is set. Raw objects expire after 30 days
@@ -50,7 +64,7 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
 - `ext_ookla_raw` pins `schemas/ookla_raw.json` and uses typed CUSTOM Hive
-  partitions. No network or CI resources are part of the current implementation.
+  partitions. No CI resources are part of the current implementation.
 
 ## Prerequisites and authentication
 
@@ -68,6 +82,8 @@ Do not run apply until you have reviewed the plan.
    for the runtime grants, plus secret creation and secret IAM management.
    Scheduled ingestion also needs repository/job/schedule management, job IAM
    get/set and `iam.serviceAccounts.actAs` on runtime/scheduler identities.
+   Network deployment needs VPC/subnet/firewall management; the optional demo
+   also needs instance/disk creation/deletion and instance/IAP-tunnel IAM get/set.
    Scope grants to the intended resources where possible;
    bucket/dataset creation also needs the corresponding project permissions.
 3. Set `$sa` to that account's email (do not use a key file), then authenticate:
@@ -99,7 +115,7 @@ terraform -chdir=infra test
 & .\infra\tests\check-ingest-plan.ps1
 ```
 
-Expected: valid configuration and `38 passed, 0 failed`. Tests mock Google:
+Expected: valid configuration and `53 passed, 0 failed`. Tests mock Google:
 they check naming, schemas, labels, partition filters, retention, destroy flags
 and input validation. They do not prove deployed resources or API behavior.
 Negative tests include reversed/out-of-range/zero-area boxes, malformed quarters,
@@ -124,11 +140,13 @@ terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
 Expected workspace: `default`. For a fresh DEV state with the default null
-developer principal and ingestion disabled, expect **13 to add, 0 to
+developer principal and ingestion/demo disabled, expect **17 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
-touches bootstrap, another environment, or includes network resources.
+touches bootstrap, another environment, creates the disabled demo, or includes
+NAT, connectors or other unrequested services.
 If the previous infrastructure is already applied without drift, expect only the
-registry addition while ingestion is disabled. Preserve any configured developer principal on subsequent plans;
+registry and four network additions if neither was previously applied and
+ingestion is disabled. Preserve any configured developer principal on subsequent plans;
 see [security instructions](../docs/security.md).
 Review it before applying:
 

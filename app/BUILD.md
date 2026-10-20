@@ -1,4 +1,4 @@
-# Curated build, quality and mart (step 06)
+# Curated build, quality and mart
 
 `python -m ingest build --type mobile --quarter 2023-Q3` processes raw GCS
 objects already written by sync. It does not call AWS or create the external
@@ -22,7 +22,7 @@ both Storage and BigQuery clients, and Secret Manager when sending an alert.
 | `NATIVE_SCHEMA_PATH` | `ookla_tiles.json` under `SCHEMAS_DIR`, or source checkout's `schemas/` if unset | Shared schema for temporary staging tables; this file-level override takes precedence |
 | `ALERT_SECRET` | `alert-telegram` | Secret ID or full `projects/<project>/secrets/<id>` name; read `versions/latest` through the Secret Manager API, never injected as a secret value |
 
-The 50% and 10,000 ms defaults were selected for this step, not derived from a
+The 50% and 10,000 ms defaults were selected as start ing values, not derived from a
 production baseline. Adjust them deliberately with DEV evidence. Changing the
 bbox or native transform requires `--force` to reprocess matching-ETag quarters;
 the ETag watermark does not fingerprint configuration or SQL.

@@ -111,7 +111,25 @@ variable "delete_contents_on_destroy" {
 
 variable "developer_principal" {
   type        = string
-  description = "Optional email IAM principal for runtime impersonation; ignored in prod. Validated by the IAM module."
+  description = "Optional email IAM principal for runtime impersonation and enabled demo IAP/OS Login; ignored in prod. Validated by child modules."
+  default     = null
+}
+
+variable "subnet_cidr" {
+  type        = string
+  description = "Private IPv4 subnet CIDR; null selects dev 10.10.0.0/24, test 10.20.0.0/24 or prod 10.30.0.0/24. Validated by network."
+  default     = null
+}
+
+variable "enable_iap_demo_vm" {
+  type        = bool
+  description = "Enable the billable IAP demo VM temporarily; false by default, including DEV."
+  default     = false
+}
+
+variable "demo_vm_zone" {
+  type        = string
+  description = "Optional demo zone override within region; null selects region-a (europe-southwest1-a by default)."
   default     = null
 }
 

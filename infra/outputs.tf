@@ -1,3 +1,28 @@
+output "network_name" {
+  description = "Custom VPC name; Cloud Run is not attached."
+  value       = module.network.network_name
+}
+
+output "subnet_name" {
+  description = "Regional private subnet name."
+  value       = module.network.subnet_name
+}
+
+output "subnet_cidr" {
+  description = "Effective environment subnet CIDR."
+  value       = module.network.subnet_cidr
+}
+
+output "iap_demo_vm_name" {
+  description = "Temporary demo VM name; null by default."
+  value       = module.network.iap_demo_vm_name
+}
+
+output "iap_demo_vm_zone" {
+  description = "Temporary demo VM zone; null by default."
+  value       = module.network.iap_demo_vm_zone
+}
+
 output "raw_bucket_name" {
   description = "Raw source bucket name."
   value       = module.storage.raw_bucket_name

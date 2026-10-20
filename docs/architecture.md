@@ -167,10 +167,29 @@ ETags still incur metadata/watermark reads, a whole-mart rebuild and an alert.
 See the [deployment runbook](runbook.md#scheduled-cloud-run-ingestion) for the
 two-stage rollout, operator permissions, cost cautions and live verification.
 
+## Private network demonstration
+
+The [network module](../modules/network/README.md) defines a custom VPC, regional
+subnet with Private Google Access, explicit deny-all ingress and an IAP-only
+TCP 22 exception for `iap-ssh` tagged instances. The subnet CIDR is an input;
+root defaults are DEV `10.10.0.0/24`, TEST `10.20.0.0/24`, PROD `10.30.0.0/24`.
+This VPC is a separate security demonstration: Cloud Run remains unattached,
+without a VPC connector or direct VPC egress configuration.
+
+Only `enable_iap_demo_vm = true` creates the private Shielded `e2-micro` demo.
+DEV zone is `europe-southwest1-a`; modules receive region/zone as inputs.
+The VM has OS Login, no external IP or attached service account, and an
+auto-deleting boot disk. An explicitly configured non-PROD developer receives
+instance-scoped IAP tunnel and OS Login grants only while the VM exists.
+PROD never gets these developer grants. The flag defaults false because
+European VM/disk usage is billable; disable and apply immediately after testing.
+The default network must be removed manually, not by Terraform.
+See [verification and cleanup](runbook.md#private-network-and-iap-demo).
+
 ## Not implemented
 
-Live Cloud Run/Scheduler execution remains unverified; custom networking, CI/CD
-and a distributed execution lock are not implemented. Raw files are global;
+Live Cloud Run/Scheduler and private-network/IAP verification remain unverified;
+CI/CD and a distributed execution lock are not implemented. Raw files are global;
 regional filtering applies during the build and does not reduce global transfer.
 
 See the [runbook](runbook.md#raw-ingestion) for manual DEV verification

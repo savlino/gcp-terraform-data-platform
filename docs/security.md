@@ -16,6 +16,50 @@ permissions and must be checked separately.
 | Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
 | Explicit `developer_principal` | `roles/iam.serviceAccountTokenCreator` | That runtime service account only, non-PROD | Local keyless impersonation; absent by default (`null`) and always absent in PROD. |
 | `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
+| Explicit `developer_principal`, enabled demo only, non-PROD | `roles/iap.tunnelResourceAccessor` | Demo instance's IAP tunnel; `destination.port == 22` condition | Deliberate SSH tunnel authorization, even if the developer already has inherited Owner access. |
+| Same demo developer | `roles/compute.osLogin` | Demo instance only | Non-admin Linux login; IAP tunnel access alone does not authorize OS login. |
+
+## Private network and IAP-only SSH
+
+The [network module](../modules/network/README.md) creates a custom-mode VPC and
+one private IPv4 subnet with Private Google Access. Default CIDRs are DEV
+`10.10.0.0/24`, TEST `10.20.0.0/24` and PROD `10.30.0.0/24`; a variable permits
+an explicit override. A priority-65534 rule (`<env>-deny-all-ingress`)
+explicitly denies all IPv4 ingress. GCP already has an implied deny at 65535,
+but that rule is invisible in code and cannot be logged; the explicit copy has
+firewall logging enabled (without metadata), so denied attempts are auditable.
+The only allow is TCP 22 from Google's fixed IAP proxy range
+`35.235.240.0/20`, priority 1000, targeting `iap-ssh` tagged instances. There is
+no default internal-access allow. An allow at lower numeric priority wins over
+the deny; upstream hierarchical firewall policies still matter.
+
+The optional demo VM has no external IP, eliminating a directly routable
+internet SSH endpoint. IAP provides identity-authorized encrypted forwarding
+instead of maintaining a public-IP bastion, its patching and an always-on
+compute bill. The network tag controls firewall targeting, not IAM: IAP and
+OS Login permissions are deliberately bound to the actual instance. Neither
+grant is created when the principal is null, the VM is disabled, or env is PROD.
+This is not an organization-wide deny policy and cannot remove inherited Owner
+permissions. Test with a non-Owner account to isolate the explicit grants.
+
+`enable_iap_demo_vm = false` by default. When enabled, the `e2-micro` in
+`europe-southwest1-a` uses Shielded Secure Boot/vTPM/integrity monitoring,
+OS Login and a 10 GiB auto-deleting disk. It has no attached service account,
+no runtime data permissions, no metadata SSH keys and no serial-port access.
+The disk and VM carry standard labels; network, subnet and firewall resources
+have no labels field in the pinned provider.
+
+European `e2-micro` use is not covered by the Compute Engine free-tier VM
+allowance. Enable only for supervised verification, then disable and apply
+immediately; stopping alone leaves disk charges. There is no automatic expiry.
+Private Google Access is not general internet access; no NAT or connector is
+added. Cloud Run is **not attached** to this VPC, so this demonstration is not
+a claim of private Cloud Run egress or isolation.
+
+The GCP-created `default` network is outside Terraform management and must be
+removed manually after checking dependencies. Without an organization policy
+this cannot prevent future default-network creation in other projects. See
+[manual cleanup, SSH checks and teardown](runbook.md#private-network-and-iap-demo).
 
 The runtime receives no invocation grant. Only the scheduler gets an explicit
 invoker grant in this configuration; administrators or inherited policies may
@@ -90,8 +134,10 @@ terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -out=dev.tfplan
 ```
 
-For a fresh deployment, repository-only configuration creates 13 resources
-(14 with the developer grant). Enabling scheduled ingestion adds four more.
+For a fresh deployment, repository-only configuration creates 17 resources
+(18 with the runtime developer grant). Enabling scheduled ingestion adds four
+more. The optional demo adds one VM; with a non-PROD developer it adds two
+instance-scoped IAM members as well.
 For an existing deployment, review the incremental plan rather than assuming a
 fixed addition count. Follow the [image-first sequence](runbook.md#scheduled-cloud-run-ingestion)
 before enabling the job. Review any unrelated changes before applying.

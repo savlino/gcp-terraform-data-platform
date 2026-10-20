@@ -1,8 +1,11 @@
-env              = "dev"
-project_id       = "dep-2610-dev"
-region           = "europe-southwest1"
-scheduler_region = "europe-west1"
-image_tag        = "83ac391"
+env                = "dev"
+project_id         = "dep-2610-dev"
+region             = "europe-southwest1"
+scheduler_region   = "europe-west1"
+subnet_cidr        = "10.10.0.0/24"
+demo_vm_zone       = "europe-southwest1-a"
+enable_iap_demo_vm = false
+image_tag          = "83ac391"
 
 # Enable only after pushing image_tag to the Terraform-created repository.
 enable_ingest_job = true

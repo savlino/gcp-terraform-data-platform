@@ -44,6 +44,9 @@ foreach ($plan in $plans) {
         throw 'The job and BigQuery tables must share the root deletion protection flag.'
     }
     $container = $job.template[0].template[0].containers[0]
+    if (@($job.template[0].template[0].vpc_access).Count -ne 0) {
+        throw 'Cloud Run must remain unattached to the demo VPC.'
+    }
     $envMap = @{}
     foreach ($item in $container.env) {
         if (@($item.value_source).Count -ne 0) {

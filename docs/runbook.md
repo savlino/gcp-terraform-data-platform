@@ -4,6 +4,203 @@ Operational procedures. Commands are for **PowerShell 7 on Windows**, run from
 the repository root. Examples target DEV (`dep-2610-dev`); change `$project`
 for other environments.
 
+## Private network and IAP demo
+
+All commands in this section are **PowerShell on Windows**, repository root.
+They are manual instructions, not a record of deployment or SSH verification.
+Use an authorized **separate Terraform deployer** via impersonated ADC for
+provider/backend, as described in [setup](setup.md); do not use the ingestion
+runtime or create a service-account key. Confirm Compute Engine/IAP APIs are
+enabled by the existing bootstrap and check the
+[network module](../modules/network/README.md) before applying.
+
+### Remove only the auto-created default network
+
+Without an organization policy, GCP may create a `default` network in each
+environment project. This repository neither imports nor deletes that network.
+Run the following read-only inventory for **each** of `dep-2610-dev`,
+`dep-2610-test`, `dep-2610-prod`; never use the ops project in this procedure.
+
+```powershell
+$project = 'dep-2610-dev' # Repeat deliberately for TEST and PROD.
+$admin = Read-Host 'Authorized network administration service account email'
+if (-not $admin) { throw 'Network administrator SA email is empty' }
+if ($project -notin @('dep-2610-dev', 'dep-2610-test', 'dep-2610-prod')) {
+  throw 'Expected an environment project, not ops'
+}
+gcloud compute networks list --project=$project --impersonate-service-account=$admin --filter='name=default' --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Default network inventory failed' }
+$instances = gcloud compute instances list --project=$project --impersonate-service-account=$admin --format=json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Instance inventory failed' }
+$users = @($instances | Where-Object {
+  @($_.networkInterfaces | Where-Object { $_.network -match '/networks/default$' }).Count -gt 0
+})
+if ($users.Count -gt 0) {
+  $users | Select-Object name, zone
+  throw 'Default network is used by VMs; stop and review migration separately'
+}
+$rules = @(gcloud compute firewall-rules list --project=$project --impersonate-service-account=$admin --format=json |
+  ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.network -match '/networks/default$' })
+if ($LASTEXITCODE -ne 0) { throw 'Firewall inventory failed' }
+$subnets = @(gcloud compute networks subnets list --project=$project --impersonate-service-account=$admin --format=json |
+  ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.network -match '/networks/default$' })
+if ($LASTEXITCODE -ne 0) { throw 'Subnet inventory failed' }
+$rules | Select-Object name, network
+$subnets | Select-Object name, region, ipCidrRange
+gcloud compute routers list --project=$project --impersonate-service-account=$admin --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Router inventory failed' }
+```
+
+Check the console for all network dependencies as well (load balancers,
+forwarding rules, VPN/peerings, reserved addresses). If anything depends on the
+default network, stop; do not delete/migrate unrelated resources. An absent
+network is already clean and needs no deletion. After reviewing the exact
+default-network rules/subnets above, the following is destructive:
+
+```powershell
+$confirmation = Read-Host "Type $project to delete only its reviewed default network, firewall rules and subnets"
+if ($confirmation -cne $project) { throw 'Deletion not confirmed' }
+foreach ($rule in $rules) {
+  gcloud compute firewall-rules delete $rule.name --project=$project --impersonate-service-account=$admin --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'Default firewall rule deletion failed; stop' }
+}
+foreach ($subnet in $subnets) {
+  $subnetRegion = ($subnet.region -split '/')[-1]
+  gcloud compute networks subnets delete $subnet.name --region=$subnetRegion --project=$project --impersonate-service-account=$admin --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'Default subnet deletion failed; stop' }
+}
+gcloud compute networks delete default --project=$project --impersonate-service-account=$admin --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Default network deletion failed; inspect remaining dependencies' }
+gcloud compute networks list --project=$project --impersonate-service-account=$admin --filter='name=default' --format='value(name)'
+if ($LASTEXITCODE -ne 0) { throw 'Default network absence check failed' }
+```
+
+Expected: final listing is empty. Do not delete the new `dev-private` (or
+TEST/PROD equivalent) VPC or any other network. Do not run the deletion block
+with stale inventory or after switching `$project`; rerun the inventory and
+review for each environment. No deletion was executed by the assistant.
+
+### Deploy the network with no VM
+
+DEV tfvars keeps `enable_iap_demo_vm = false`. Its CIDR is `10.10.0.0/24`;
+root defaults for TEST/PROD are `10.20.0.0/24` and `10.30.0.0/24`.
+Cloud Run has no VPC attachment before or after this apply.
+
+```powershell
+$project = 'dep-2610-dev' # Do not reuse the last project from default-network cleanup.
+terraform -chdir=infra init -reconfigure -input=false '-backend-config=env/dev.gcs.tfbackend'
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=network-dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Network plan failed' }
+# Review before applying: four network additions, no VM/IAP IAM, if earlier steps are current.
+terraform -chdir=infra apply network-dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Network apply failed' }
+gcloud compute networks describe dev-private --project=$project --impersonate-service-account=$admin --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Custom VPC inspection failed' }
+gcloud compute networks subnets describe dev-private --region=europe-southwest1 --project=$project --impersonate-service-account=$admin --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Subnet inspection failed' }
+```
+
+Expected: `autoCreateSubnetworks=false`, `routingConfig.routingMode=REGIONAL`,
+correct CIDR/region and `privateIpGoogleAccess=true`. If an earlier network apply
+created `dev-deny-ingress`, the plan replaces it with `dev-deny-all-ingress`;
+during the swap the implied 65535 deny still blocks ingress. Review other
+changes separately; do not bundle replacements, IAM drift or unrelated updates
+into this step.
+
+### Enable briefly and verify IAP SSH
+
+This DEV VM is **billable in Europe**, not free tier. Reserve enough time for
+both the test and teardown. Set `enable_iap_demo_vm = true` temporarily in DEV
+tfvars; set `developer_principal` explicitly in your local configuration (for
+example `user:you@example.com`, never a secret). Preserve that value across
+plans: it also controls the existing non-PROD runtime impersonation grant.
+Do not commit a personal identity without intending to publish it.
+
+Review/apply another plan as the deployer. Expect one VM and two instance IAM
+members; if the developer was previously null, the separate runtime
+impersonation member is also added. The VM is `dev-iap-demo`, `e2-micro`,
+`europe-southwest1-a`, Debian 12, 10 GiB disk. Both demo grants are omitted in
+PROD even with a principal set.
+
+For SSH, use **the developer's gcloud user login**, not deployer impersonation.
+The developer needs the generated instance IAP/OS Login grants, plus existing
+Compute discovery permissions (`compute.projects.get` and instance lookup).
+No broad project role is added here. Non-organization users normally do not
+need OS Login External User; organization-owned projects may require that
+separate organization-level prerequisite. SSH keys are login keys, never
+service-account keys; gcloud may generate/use a local SSH key.
+
+```powershell
+$project = 'dep-2610-dev'
+$vm = 'dev-iap-demo'
+$zone = 'europe-southwest1-a'
+gcloud auth list --filter=status:ACTIVE --format='value(account)'
+gcloud config get-value auth/impersonate_service_account
+# Confirm this is the intended developer; also check no CLOUDSDK_AUTH_* override.
+gcloud compute ssh $vm --project=$project --zone=$zone --tunnel-through-iap --ssh-key-expire-after=10m --command='whoami'
+if ($LASTEXITCODE -ne 0) { throw 'Positive IAP SSH check failed' }
+$vmInfo = gcloud compute instances describe $vm --project=$project --zone=$zone --format=json | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Demo VM description failed' }
+if (@($vmInfo.networkInterfaces | Where-Object {
+  $_.accessConfigs -or $_.ipv6AccessConfigs
+}).Count -gt 0) { throw 'Unexpected external IP access configuration' }
+$vmInfo | Select-Object name, machineType, tags, shieldedInstanceConfig, metadata, serviceAccounts
+$diskName = (($vmInfo.disks | Where-Object { $_.boot }).source -split '/')[-1]
+```
+
+Expected: SSH prints a Linux username, no access configs, no attached service
+account, `iap-ssh` tag, OS Login enabled and all three Shielded settings true.
+Use a non-Owner developer to isolate IAM effectiveness; inherited Owner access
+can authorize a tunnel regardless of this explicit member.
+
+### Negative firewall test and immediate teardown
+
+Close existing SSH sessions. Disable only the IAP allow rule temporarily using
+the administrator identity; a new SSH tunnel must then fail. Restore the rule
+in `finally`, even when the negative test fails:
+
+```powershell
+try {
+  gcloud compute firewall-rules update dev-allow-iap-ssh --project=$project --impersonate-service-account=$admin --disabled
+  if ($LASTEXITCODE -ne 0) { throw 'Cannot disable IAP rule; negative test not started' }
+  # Allow firewall propagation before opening a NEW connection.
+  Start-Sleep -Seconds 30
+  gcloud compute ssh $vm --project=$project --zone=$zone --tunnel-through-iap --ssh-flag='-oConnectTimeout=10' --command='whoami'
+  if ($LASTEXITCODE -eq 0) { throw 'Unexpected SSH success with IAP allow disabled' }
+} finally {
+  gcloud compute firewall-rules update dev-allow-iap-ssh --project=$project --impersonate-service-account=$admin --no-disabled
+  if ($LASTEXITCODE -ne 0) { throw 'Firewall restore failed; restore explicitly before proceeding' }
+}
+```
+
+Expected: the negative connection fails because IAP cannot reach backend port
+22 (for example backend connection failure), not because of missing user
+credentials, expired keys or OS Login denial. Repeat positive SSH after
+restoration to distinguish a firewall denial from unrelated auth failures.
+The explicit deny and implied ingress deny remain active throughout.
+
+**Immediately set `enable_iap_demo_vm = false` in DEV tfvars**, then plan and
+apply as the deployer, retaining the intended developer setting:
+
+```powershell
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=network-dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Demo teardown plan failed' }
+# Review: destroy demo VM and its two instance IAM members; boot disk auto-deletes.
+terraform -chdir=infra apply network-dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Demo teardown failed; billable resources may remain' }
+gcloud compute instances list --project=$project --impersonate-service-account=$admin --filter="name=$vm" --format='value(name)'
+if ($LASTEXITCODE -ne 0) { throw 'VM absence check failed' }
+gcloud compute disks list --project=$project --impersonate-service-account=$admin --filter="name=$diskName" --format='value(name)'
+if ($LASTEXITCODE -ne 0) { throw 'Boot disk absence check failed' }
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -detailed-exitcode
+if ($LASTEXITCODE -ne 0) { throw 'Post-teardown plan is not clean' }
+```
+
+Expected: VM/disk listings are empty, no demo IAM remains, the four network
+resources remain, and the final plan has no changes. Stopping the VM is not
+equivalent to destroying it: persistent disk can still incur charges. If
+anything fails, treat teardown as outstanding; there is no automatic TTL.
+
 ## Scheduled Cloud Run ingestion
 
 These are **manual PowerShell on Windows** procedures, not evidence of a live

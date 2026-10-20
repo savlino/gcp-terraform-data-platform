@@ -14,6 +14,11 @@ run "dev_plan" {
   command = plan
 
   assert {
+    condition     = output.network_name == "dev-private" && output.subnet_cidr == "10.10.0.0/24" && output.iap_demo_vm_name == null
+    error_message = "DEV must default to its private subnet without a billable demo."
+  }
+
+  assert {
     condition     = output.raw_bucket_name == "dep-2610-dev-raw" && output.dataset_id == "network_perf"
     error_message = "DEV resource names must be stable."
   }
@@ -21,6 +26,39 @@ run "dev_plan" {
   assert {
     condition     = toset(keys(output.table_ids)) == toset(["ookla_tiles", "load_log", "mart_quarterly_performance", "ext_ookla_raw"])
     error_message = "The dataset must expose three native tables and the raw external table."
+  }
+}
+
+run "test_subnet_default" {
+  command = plan
+  variables {
+    env = "test"
+  }
+  assert {
+    condition     = output.subnet_cidr == "10.20.0.0/24" && output.iap_demo_vm_name == null
+    error_message = "TEST must default to its own CIDR with no VM."
+  }
+}
+
+run "prod_subnet_default" {
+  command = plan
+  variables {
+    env = "prod"
+  }
+  assert {
+    condition     = output.subnet_cidr == "10.30.0.0/24" && output.iap_demo_vm_name == null
+    error_message = "PROD must default to its own CIDR with no VM."
+  }
+}
+
+run "subnet_override" {
+  command = plan
+  variables {
+    subnet_cidr = "10.99.0.0/24"
+  }
+  assert {
+    condition     = output.subnet_cidr == "10.99.0.0/24"
+    error_message = "An explicit CIDR must override the environment default."
   }
 }
 

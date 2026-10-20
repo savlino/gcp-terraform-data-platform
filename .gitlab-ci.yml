@@ -129,10 +129,11 @@ policy:dev:
       artifacts: true          # takes infra/dev.plan.json from plan:dev
   interruptible: true          # a newer push to the MR cancels this run
   script:
-    - test -f infra/dev.plan.json || { echo "dev.plan.json is missing: plan:dev did not produce it"; exit 1; }
+    - 'test -f infra/dev.plan.json || { echo "dev.plan.json is missing: plan:dev did not produce it"; exit 1; }'
     - python scripts/check_plan.py infra/dev.plan.json
 
 apply:dev:
+  stage: apply
   needs: [plan:dev, policy:dev]
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH

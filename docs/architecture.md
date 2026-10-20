@@ -1,8 +1,9 @@
 # Application architecture
 
-The current application implements raw ingestion only. Terraform defines the
-destination infrastructure; Python performs discovery, incremental decisions,
-source schema validation and streaming transfer. Local unit tests use synthetic
+The current application implements raw ingestion and curated builds. Terraform
+defines the destination infrastructure; Python performs discovery, incremental
+decisions, source schema validation, streaming transfer and staged transforms.
+Local unit tests use synthetic
 data and mocked cloud services; they do not establish that the live deployment
 or cross-cloud transfer has been verified.
 
@@ -71,6 +72,30 @@ project-scoped Job User and access to the configured alert secret only.
 The sync command currently uses only storage access; it does not read the secret.
 See [security](security.md) for scope details and impersonation restrictions.
 
+## Scheduler region decision
+
+Cloud Scheduler uses a separate `scheduler_region` input, defaulting to
+`europe-west1` (Belgium), while the data region remains `europe-southwest1`
+(Madrid). Madrid is not listed among the supported Cloud Scheduler locations.
+Belgium is a nearby supported European region identified by Google as a
+low-carbon location; this is a placement choice, not a measured emissions claim.
+
+The configured Scheduler resource stores the schedule and sends an authenticated
+HTTPS request to the Cloud Run Jobs API URL targeting the job in Madrid.
+Scheduler and the target job do not need to share a region: the job's execution,
+raw bucket and BigQuery dataset stay in `europe-southwest1`. Moving the schedule
+does not move or replicate the application data to Belgium.
+
+The [ingest_job module](../modules/ingest_job/README.md) passes `scheduler_region`
+only to Scheduler and `region` to Cloud Run and Artifact Registry; data resources
+retain the same `region`. Validation checks location syntax, not service
+availability; recheck the official location list before deployment. Scheduler
+uses the distinct `ingest-scheduler` identity with an additive invoker grant on
+this job only, an OAuth access token and the v2 Jobs `:run` endpoint.
+
+- [Cloud Scheduler locations](https://docs.cloud.google.com/scheduler/docs/locations)
+- [Cloud Scheduler release notes](https://docs.cloud.google.com/scheduler/docs/release-notes)
+
 ## Curated build pipeline
 
 Terraform defines `ext_ookla_raw` with Parquet autodetection, typed CUSTOM Hive
@@ -95,11 +120,57 @@ See [build behavior and recovery](../app/BUILD.md) for thresholds, transaction
 boundaries and single-writer limitations. This path has local test coverage,
 not verified live BigQuery execution.
 
+## Application container
+
+The [Dockerfile](../app/Dockerfile) builds from the repository root on
+`python:3.12-slim`, installs the application with packaged SQL, and copies shared
+schemas to `/app/schemas` via `SCHEMAS_DIR`. It runs as non-root UID 10001 with
+unbuffered output and bytecode writes disabled. The allowlisted build context
+excludes local credentials and virtualenvs; authentication is supplied at runtime,
+not embedded in image layers.
+
+The default `python -m ingest run` executes sync then build with the same
+type/quarter scope and stops on sync failure. These stages are not one transaction:
+if build fails, successful raw transfers remain available for a retry. A combined
+dry-run previews build against existing raw files, not the files sync would upload.
+See [container verification](../app/README.md#container) for offline smoke checks.
+
+## Managed execution
+
+Artifact Registry has immutable tags and one cleanup policy: delete untagged
+versions older than seven days (failed/partial push leftovers). Tagged releases
+are intentionally retained and may accumulate. `image_tag` is selected in
+environment tfvars.
+`enable_ingest_job` defaults false for image-first provisioning: apply the
+repository, push the image, then enable the job/schedule. No automatic image
+build or push is part of Terraform.
+
+The job retains the Python image entrypoint and uses `args = ["run"]`, one
+task and parallelism one, attached runtime SA, configurable deadline/memory and
+zero task retries by default. Root variables supply all non-secret application
+settings, including bbox, minimum quarter, billing cap and DQ thresholds;
+bucket, dataset and alert-secret names come from module outputs.
+`ALERT_SECRET` contains only the secret resource name. The app reads its latest
+version via Secret Manager API, not Cloud Run secret environment injection.
+
+The weekly UTC schedule defaults active in DEV, paused in TEST/PROD, with an
+explicit pause override. Scheduler launch acceptance does not imply pipeline
+completion. Zero configured Scheduler retries and one task do not guarantee
+exactly-once/non-overlapping runs; manual and scheduled runs must be serialized.
+No VPC connector is attached: source and Telegram traffic use public HTTPS,
+without adding Cloud NAT or other networking in this step.
+
+One vCPU / 1 GiB / one hour is an initial bounded-streaming estimate, not
+measured whole-file sizing: no source-size benchmark is recorded. Unchanged
+ETags still incur metadata/watermark reads, a whole-mart rebuild and an alert.
+See the [deployment runbook](runbook.md#scheduled-cloud-run-ingestion) for the
+two-stage rollout, operator permissions, cost cautions and live verification.
+
 ## Not implemented
 
-Cloud Run execution, scheduling, custom networking and CI/CD are also not
-implemented. Raw files are global; regional filtering applies during the build
-and does not reduce the global source transfer.
+Live Cloud Run/Scheduler execution remains unverified; custom networking, CI/CD
+and a distributed execution lock are not implemented. Raw files are global;
+regional filtering applies during the build and does not reduce global transfer.
 
 See the [runbook](runbook.md#raw-ingestion) for manual DEV verification
 and [lessons learned](lessons-learned.md) for idempotence-test pitfalls.

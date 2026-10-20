@@ -19,7 +19,8 @@ both Storage and BigQuery clients, and Secret Manager when sending an alert.
 | `MART_ZOOM` | `10` | Quadkey-prefix length, 1 through 16 |
 | `MINIMUM_ROW_PERCENT` | `50` | Minimum regional rows as a percentage of the immediately preceding quarter's curated rows for the same type |
 | `LATENCY_CEILING_MS` | `10000` | Warning ceiling and per-column exclusion threshold for mart latency averages |
-| `NATIVE_SCHEMA_PATH` | Source checkout's `schemas/ookla_tiles.json` | Shared schema for temporary staging tables; override for a standalone deployment |
+| `NATIVE_SCHEMA_PATH` | `ookla_tiles.json` under `SCHEMAS_DIR`, or source checkout's `schemas/` if unset | Shared schema for temporary staging tables; this file-level override takes precedence |
+| `ALERT_SECRET` | `alert-telegram` | Secret ID or full `projects/<project>/secrets/<id>` name; read `versions/latest` through the Secret Manager API, never injected as a secret value |
 
 The 50% and 10,000 ms defaults were selected for this step, not derived from a
 production baseline. Adjust them deliberately with DEV evidence. Changing the
@@ -142,7 +143,7 @@ Secret/HTTP failures only log fixed warnings and never fail the data build.
 No request URL, token, response body or exception text from notification handling
 is logged. Redirects are disabled. Dry-run does not access the secret.
 
-See [the runbook](../docs/runbook.md#curated-build-step-06) for DEV commands.
+See [the runbook](../docs/runbook.md#curated-build) for DEV commands.
 Local mocks and adapted SQLite SQL checks pass; BigQuery execution, transactions
 and delivery still need live verification. Python 3.12 execution is unverified
 on this machine; local tests run under Python 3.14.

@@ -15,7 +15,7 @@ from ingest.build import (
     sql,
 )
 from ingest.build_config import BuildConfig
-from ingest.config import Config
+from ingest.config import Config, SourceConfig
 from ingest.quality import QualityError, QualityResult
 
 
@@ -32,7 +32,9 @@ def build_setup(monkeypatch, schema_path):
         "LATENCY_CEILING_MS",
     ):
         monkeypatch.delenv(key, raising=False)
-    config = Config("dep-2610-dev", "dep-2610-dev-raw", (2023, 3), "us-west-2", schema_path, None)
+    config = Config(
+        "dep-2610-dev", "dep-2610-dev-raw", (2023, 3), SourceConfig(), schema_path, None
+    )
     settings = BuildConfig.from_env()
     part = RawPartition(
         "mobile",

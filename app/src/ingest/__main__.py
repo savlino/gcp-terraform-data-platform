@@ -4,7 +4,6 @@ import logging
 from datetime import UTC, datetime
 
 import google.auth
-import pyarrow.fs as fs
 from google.auth import impersonated_credentials
 from google.auth.credentials import Credentials
 from google.cloud import bigquery, storage
@@ -14,7 +13,7 @@ from ingest.build import BuildError, build
 from ingest.build_config import BuildConfig
 from ingest.config import Config, parse_quarter
 from ingest.discover import discover, http_session
-from ingest.schema_check import check_source
+from ingest.schema_check import check_source, source_filesystem
 from ingest.state import pending
 from ingest.transfer import transfer
 
@@ -57,6 +56,63 @@ def positive_int(value: str) -> int:
     return parsed
 
 
+def sync_files(
+    config: Config,
+    network_type: str,
+    quarter: tuple[int, int] | None,
+    limit: int | None,
+    dry_run: bool,
+) -> None:
+    # Fail on a missing/invalid contract even when the bucket is already current.
+    contract = json.loads(config.schema_path.read_text(encoding="utf-8"))
+    if not isinstance(contract, list) or not contract:
+        raise ValueError("Source schema contract must be a non-empty JSON array.")
+    with storage_client(config) as client, http_session() as session:
+        bucket = client.bucket(config.raw_bucket)
+        layers = ["mobile", "fixed"] if network_type == "all" else [network_type]
+        sources = [
+            source
+            for layer in layers
+            for source in discover(session, config.source, layer, config.min_quarter)
+        ]
+        sources.sort(key=lambda source: (source.year, source.quarter, source.key))
+        if quarter is not None:
+            sources = [source for source in sources if (source.year, source.quarter) == quarter]
+            if not sources:
+                raise ValueError("Requested quarter has no source objects for the selected type.")
+        decisions = [decision for source in sources if (decision := pending(bucket, source))]
+        selected = decisions[:limit] if limit is not None else decisions
+        LOGGER.info(
+            "Discovered %d objects; %d pending; %d selected; dry_run=%s",
+            len(sources),
+            len(decisions),
+            len(selected),
+            dry_run,
+        )
+        source_fs = source_filesystem(config.source) if selected and not dry_run else None
+        for decision in selected:
+            LOGGER.info(
+                "%s %s -> gs://%s/%s (%d bytes, %s)",
+                "Would transfer" if dry_run else "Transferring",
+                decision.source.key,
+                config.raw_bucket,
+                decision.source.destination,
+                decision.source.size,
+                decision.reason,
+            )
+            if source_fs is not None:
+                check_source(
+                    source_fs,
+                    config.source,
+                    decision.source.key,
+                    decision.source.size,
+                    config.schema_path,
+                )
+                LOGGER.info("Source footer schema checked: %s", decision.source.key)
+                transfer(session, bucket, decision)
+        LOGGER.info("Sync succeeded; transferred=%d", 0 if dry_run else len(selected))
+
+
 def main() -> int:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
@@ -84,18 +140,27 @@ def main() -> int:
     build_command.add_argument(
         "--force", action="store_true", help="Rebuild selected raw quarters even when ETags match."
     )
+    run = commands.add_parser("run", help="Sync raw files, then build curated tables and the mart.")
+    run.add_argument("--type", choices=["mobile", "fixed", "all"], default="all")
+    run.add_argument("--quarter", type=parse_quarter, metavar="YYYY-QN")
+    run.add_argument("--dry-run", action="store_true")
+    run.add_argument(
+        "--force", action="store_true", help="Force the build only; sync still skips current files."
+    )
     args = parser.parse_args()
     try:
         config = Config.from_env()
         if args.quarter is not None and args.quarter < config.min_quarter:
             raise ValueError("--quarter must be at or after MIN_QUARTER.")
-        settings = BuildConfig.from_env() if args.command == "build" else None
+        settings = BuildConfig.from_env() if args.command in ("build", "run") else None
         effective_config = {
             "command": args.command,
             "project_id": config.project_id,
             "raw_bucket": config.raw_bucket,
             "min_quarter": config.min_quarter,
-            "s3_region": config.s3_region,
+            "source_bucket": config.source.bucket,
+            "source_region": config.source.region,
+            "source_endpoint": config.source.endpoint,
             "source_schema_path": str(config.schema_path),
             "impersonation_enabled": config.impersonate_service_account is not None,
             "network_type": args.type,
@@ -117,6 +182,14 @@ def main() -> int:
         else:
             effective_config["limit"] = args.limit
         LOGGER.info("Effective configuration: %s", json.dumps(effective_config, sort_keys=True))
+        if args.command in ("sync", "run"):
+            sync_files(
+                config,
+                args.type,
+                args.quarter,
+                args.limit if args.command == "sync" else None,
+                args.dry_run,
+            )
         if settings is not None:
             credentials = application_credentials(config)
             try:
@@ -147,64 +220,6 @@ def main() -> int:
             if not args.dry_run:
                 notify(credentials, config.project_id, summary)
             return 0
-        # Fail on a missing/invalid contract even when the bucket is already current.
-        contract = json.loads(config.schema_path.read_text(encoding="utf-8"))
-        if not isinstance(contract, list) or not contract:
-            raise ValueError("Source schema contract must be a non-empty JSON array.")
-        with storage_client(config) as client, http_session() as session:
-            bucket = client.bucket(config.raw_bucket)
-            layers = ["mobile", "fixed"] if args.type == "all" else [args.type]
-            sources = [
-                source
-                for layer in layers
-                for source in discover(session, layer, config.min_quarter)
-            ]
-            sources.sort(key=lambda source: (source.year, source.quarter, source.key))
-            if args.quarter is not None:
-                sources = [
-                    source for source in sources if (source.year, source.quarter) == args.quarter
-                ]
-                if not sources:
-                    raise ValueError(
-                        "Requested quarter has no source objects for the selected type."
-                    )
-            decisions = [decision for source in sources if (decision := pending(bucket, source))]
-            selected = decisions[: args.limit] if args.limit is not None else decisions
-            LOGGER.info(
-                "Discovered %d objects; %d pending; %d selected; dry_run=%s",
-                len(sources),
-                len(decisions),
-                len(selected),
-                args.dry_run,
-            )
-            source_fs = (
-                fs.S3FileSystem(
-                    anonymous=True,
-                    region=config.s3_region,
-                    connect_timeout=10,
-                    request_timeout=120,
-                    retry_strategy=fs.AwsStandardS3RetryStrategy(max_attempts=4),
-                )
-                if selected and not args.dry_run
-                else None
-            )
-            for decision in selected:
-                LOGGER.info(
-                    "%s %s -> gs://%s/%s (%d bytes, %s)",
-                    "Would transfer" if args.dry_run else "Transferring",
-                    decision.source.key,
-                    config.raw_bucket,
-                    decision.source.destination,
-                    decision.source.size,
-                    decision.reason,
-                )
-                if source_fs is not None:
-                    check_source(
-                        source_fs, decision.source.key, decision.source.size, config.schema_path
-                    )
-                    LOGGER.info("Source footer schema checked: %s", decision.source.key)
-                    transfer(session, bucket, decision)
-            LOGGER.info("Sync succeeded; transferred=%d", 0 if args.dry_run else len(selected))
         return 0
     except Exception:
         LOGGER.exception("%s failed", args.command.capitalize())

@@ -11,6 +11,7 @@ from ingest import alerts
 
 @pytest.fixture
 def telegram(monkeypatch):
+    monkeypatch.delenv("ALERT_SECRET", raising=False)
     client = MagicMock()
     client.__enter__.return_value = client
     client.access_secret_version.return_value.payload.data = json.dumps(
@@ -38,6 +39,27 @@ def test_telegram_success(telegram):
     )
     assert session.post.call_args.kwargs["json"] == {"chat_id": "123", "text": "DQ=PASS rows=10"}
     assert session.post.call_args.kwargs["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("secret", ["custom-alert", "projects/dep-2610-dev/secrets/custom-alert"])
+def test_alert_secret_selected_by_environment(telegram, monkeypatch, secret):
+    client, _, _ = telegram
+    monkeypatch.setenv("ALERT_SECRET", secret)
+    alerts.notify(MagicMock(), "dep-2610-dev", "Summary")
+    assert client.access_secret_version.call_args.kwargs["request"]["name"] == (
+        "projects/dep-2610-dev/secrets/custom-alert/versions/latest"
+    )
+
+
+@pytest.mark.parametrize("secret", ["", " ", "https://invalid", "alert/versions/latest"])
+def test_invalid_alert_secret_is_safely_reported(telegram, monkeypatch, caplog, secret):
+    client, session, _ = telegram
+    monkeypatch.setenv("ALERT_SECRET", secret)
+    with caplog.at_level(logging.WARNING):
+        alerts.notify(MagicMock(), "dep-2610-dev", "Summary")
+    client.access_secret_version.assert_not_called()
+    session.post.assert_not_called()
+    assert "sensitive details suppressed" in caplog.text
 
 
 @pytest.mark.parametrize("failure", ["transport", "secret", "bad_json", "api_rejection"])

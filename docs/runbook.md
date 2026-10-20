@@ -4,6 +4,239 @@ Operational procedures. Commands are for **PowerShell 7 on Windows**, run from
 the repository root. Examples target DEV (`dep-2610-dev`); change `$project`
 for other environments.
 
+## Scheduled Cloud Run ingestion
+
+These are **manual PowerShell on Windows** procedures, not evidence of a live
+deployment. See [module inputs and limits](../modules/ingest_job/README.md).
+The [DEV tfvars](../infra/env/dev.tfvars) initially has
+`enable_ingest_job = false`: the first apply adds the repository but no job or
+schedule. Do not use routine `-target` applies or a placeholder public image.
+
+### 1. Prerequisites and repository-first apply
+
+Infra, ingest and transform must already be deployed and verified, including
+raw Parquet for external-table autodetection, native tables, runtime grants and
+an enabled `alert-telegram` version. Confirm the existing bootstrap API
+configuration has actually enabled `run.googleapis.com`,
+`artifactregistry.googleapis.com`, `cloudscheduler.googleapis.com`,
+`secretmanager.googleapis.com` and `logging.googleapis.com`. Cloud Run and
+Scheduler service agents must retain their normal Google-managed service-agent
+roles. Do not grant those roles to workload accounts.
+
+Use the authorized Terraform deployer via impersonated ADC from
+[setup](setup.md). It additionally needs repository/job/schedule management,
+job IAM get/set, service-account creation and `iam.serviceAccounts.actAs` on
+runtime and scheduler accounts. The same-project Cloud Run service agent pulls
+the image; the runtime does not need Artifact Registry Reader.
+An authorized publisher needs repository-scoped Artifact Registry Writer and
+your user must be allowed to impersonate it. This step does not create or grant
+publisher/deployer identities.
+
+Choose a unique `image_tag` in DEV tfvars.
+Keep `enable_ingest_job = false`; preserve any existing developer principal.
+
+```powershell
+terraform -chdir=infra init -reconfigure -input=false '-backend-config=env/dev.gcs.tfbackend'
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Repository plan failed' }
+# Review the plan before continuing: no job/scheduler yet.
+terraform -chdir=infra apply dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Repository apply failed' }
+```
+
+If the preceding infrastructure is unchanged, expect just one new repository
+`dev-ingest` in `europe-southwest1`. Stop on unexpected deletions or environment
+changes. Full fresh infrastructure needs the earlier external-table bootstrap
+sequence; this is not a workaround for missing raw data.
+
+### 2. Build and push the tfvars-selected tag
+
+The build context is the repository root. Use Docker Desktop's Linux engine.
+The environment override below makes the gcloud Docker credential helper use
+the publisher identity, rather than silently pushing as your user. It restores
+the prior override afterward and never creates a service-account key.
+
+```powershell
+$image = terraform -chdir=infra output -raw ingest_image_uri
+if ($LASTEXITCODE -ne 0 -or -not $image) { throw 'Image URI output is missing' }
+$registry = ($image -split '/')[0]
+$publisher = Read-Host 'Authorized image publisher service account email'
+if (-not $publisher) { throw 'Publisher SA email is empty' }
+$previousImpersonation = $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT
+try {
+  $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT = $publisher
+  gcloud auth configure-docker $registry --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'Docker credential helper configuration failed' }
+  docker build -f app\Dockerfile -t $image .
+  if ($LASTEXITCODE -ne 0) { throw 'Image build failed' }
+  docker run --rm --network none $image run --help
+  if ($LASTEXITCODE -ne 0) { throw 'Offline image smoke test failed' }
+  docker push $image
+  if ($LASTEXITCODE -ne 0) { throw 'Image push failed; do not enable the job' }
+} finally {
+  if ($null -eq $previousImpersonation) {
+    Remove-Item Env:\CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT -ErrorAction SilentlyContinue
+  } else {
+    $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT = $previousImpersonation
+  }
+}
+```
+
+Expected: push succeeds and reports a digest. Tags are immutable; use a new tag
+for each changed image. Do not overwrite an existing release tag. The cleanup
+policy deletes only untagged versions older than seven days. **Tagged releases
+accumulate** because immutable tagged artifacts are intentionally retained.
+Review registry storage before repeated releases.
+
+### 3. Enable the job; verify manually before activating the schedule
+
+Set `enable_ingest_job = true` in DEV tfvars. Temporarily set
+`scheduler_paused = true` for the first trial. Review `min_quarter`, bbox, query
+budget and DQ thresholds before launching: default `run` processes **both**
+network types and all quarters from `MIN_QUARTER`, not just the Iberian subset
+of source bytes. Source objects are global and can be large.
+
+```powershell
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Job plan failed' }
+# Review: four additions (job, scheduler SA, job IAM member, paused schedule).
+terraform -chdir=infra apply dev.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Job apply failed' }
+
+$project = 'dep-2610-dev'
+$region = 'europe-southwest1'
+$schedulerRegion = 'europe-west1'
+$job = terraform -chdir=infra output -raw ingest_job_name
+if ($LASTEXITCODE -ne 0 -or -not $job) { throw 'Job output is missing' }
+$schedule = terraform -chdir=infra output -raw scheduler_job_name
+if ($LASTEXITCODE -ne 0 -or -not $schedule) { throw 'Schedule output is missing' }
+$operator = Read-Host 'Authorized execution operator service account email'
+if (-not $operator) { throw 'Operator SA email is empty' }
+gcloud run jobs describe $job --project=$project --region=$region --impersonate-service-account=$operator --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Job inspection failed' }
+gcloud scheduler jobs describe $schedule --project=$project --location=$schedulerRegion --impersonate-service-account=$operator --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Scheduler inspection failed' }
+```
+
+Verify image tag, runtime identity, `args: [run]`, all non-secret env settings,
+Madrid job / Belgium schedule, OAuth (not OIDC), and a resource-name-only
+`ALERT_SECRET`. There must be no Cloud Run secret `valueSource`.
+The operator needs job get/run and run-with-overrides for the scoped command,
+plus Scheduler inspection and logging access for the following checks.
+No extra operator grants are made by this Terraform configuration.
+
+Start with one already verified quarter/type (change the example deliberately).
+The `--args` flag replaces the container arguments for **this execution only**:
+
+```powershell
+gcloud run jobs execute $job --project=$project --region=$region --impersonate-service-account=$operator '--args=run,--type,mobile,--quarter,2023-Q3' --wait
+if ($LASTEXITCODE -ne 0) { throw 'Scoped Cloud Run execution failed' }
+```
+
+After checking cost, duration, memory and DQ, the full configured command is:
+
+```powershell
+gcloud run jobs execute $job --project=$project --region=$region --impersonate-service-account=$operator --wait
+if ($LASTEXITCODE -ne 0) { throw 'Cloud Run execution failed' }
+gcloud logging read "resource.type=cloud_run_job AND resource.labels.job_name=$job" --project=$project --impersonate-service-account=$operator --limit=50 --format=json
+if ($LASTEXITCODE -ne 0) { throw 'Job log read failed' }
+```
+
+Expected: execution succeeds; structured JSON logs show sync, quality,
+publication and mart success without secret values or Telegram Bot API URLs.
+Check the Telegram chat separately: notification failure is a warning, not a
+failed data pipeline. Confirm `load_log` and a populated mart with the runtime
+identity (DEV user needs its existing non-PROD Token Creator grant):
+
+```powershell
+$runtime = terraform -chdir=infra output -raw runtime_service_account_email
+if ($LASTEXITCODE -ne 0 -or -not $runtime) { throw 'Runtime SA output is empty' }
+$sql = 'SELECT network_type, quarter_start, status, loaded_row_count, loaded_at FROM `dep-2610-dev.network_perf.load_log` WHERE quarter_start = DATE ''2023-07-01'' AND network_type = ''mobile'' ORDER BY loaded_at DESC'
+bq --impersonate_service_account=$runtime --project_id=$project --location=$region query --use_legacy_sql=false --maximum_bytes_billed=10737418240 $sql
+if ($LASTEXITCODE -ne 0) { throw 'Load-log verification failed' }
+$sql = 'SELECT COUNT(*) AS mart_rows, SUM(total_tests) AS tests FROM `dep-2610-dev.network_perf.mart_quarterly_performance` WHERE quarter_start = DATE ''2023-07-01'' AND network_type = ''mobile'''
+bq --impersonate_service_account=$runtime --project_id=$project --location=$region query --use_legacy_sql=false --maximum_bytes_billed=10737418240 $sql
+if ($LASTEXITCODE -ne 0) { throw 'Mart verification failed' }
+```
+
+Expected: a latest SUCCESS row with positive `loaded_row_count`, positive
+`mart_rows` / tests, and a Telegram summary. On an unchanged rerun the load-log
+timestamp need not change; mart rebuilds still run. See the independent
+calculation and network-type preservation checks later in this runbook.
+
+### 4. Negative invocation test and schedule activation
+
+The runtime must not be able to launch its own job. First obtain a runtime
+token successfully, then call `:run` directly so a failed description read
+cannot masquerade as the required invocation denial. Do not print the token,
+enable tracing or save it. This is a DEV-only test: if IAM is unexpectedly
+broad, the request can actually launch the full job; check for overlap first.
+
+```powershell
+$token = gcloud auth print-access-token --impersonate-service-account=$runtime
+if ($LASTEXITCODE -ne 0 -or -not $token) { throw 'Runtime impersonation failed; not an invocation test' }
+$status = $null
+try {
+  try {
+    $null = Invoke-RestMethod -Method Post -Uri "https://run.googleapis.com/v2/projects/$project/locations/$region/jobs/${job}:run" -Headers @{ Authorization = "Bearer $token" } -ContentType 'application/json' -Body '{}'
+    $status = 200
+  } catch {
+    if ($null -eq $_.Exception.Response) { throw 'No HTTP response; invocation denial is unverified' }
+    $status = [int]$_.Exception.Response.StatusCode
+  }
+} finally {
+  $token = $null
+}
+if ($status -ne 403) { throw "Expected jobs:run HTTP 403; got $status. Inspect inherited IAM and any unexpected execution." }
+```
+
+Only the scheduler gets an explicit job invoker grant here; inherited admin
+roles can still allow other identities. A 404, failed impersonation or disabled
+API is not a passing denial test.
+
+Ensure no execution is active, then test the actual Scheduler identity path
+while paused (`jobs run` dispatches on demand). The operator additionally needs
+`cloudscheduler.jobs.run`:
+
+```powershell
+gcloud scheduler jobs run $schedule --project=$project --location=$schedulerRegion --impersonate-service-account=$operator
+if ($LASTEXITCODE -ne 0) { throw 'Scheduler dispatch failed' }
+gcloud run jobs executions list --job=$job --project=$project --region=$region --impersonate-service-account=$operator --limit=5
+if ($LASTEXITCODE -ne 0) { throw 'Execution listing failed' }
+```
+
+Inspect that execution to completion and repeat the log/data/Telegram checks.
+Scheduler success only means the asynchronous launch request was accepted.
+Single task/parallelism one does **not** prevent overlapping executions, and
+Scheduler is not exactly-once. Do not launch a manual run during a scheduled one.
+No distributed lock is implemented.
+
+After verification, change DEV `scheduler_paused` to false and review/apply
+another plan. The schedule is Monday 06:00 Europe/Madrid (following daylight
+saving time); TEST/PROD default to paused when
+the override is null. The initial task has 1 vCPU / 1 GiB / 3600 seconds and zero
+task retries (at most one may be configured); Scheduler retries are disabled.
+The app has bounded transfer
+retries. No measured source-file size is recorded, so these are streaming-based
+estimates, not a guaranteed backfill capacity. Record DEV peak memory and
+duration before increasing limits.
+
+### Updating or stopping
+
+For an update, choose a new unique `image_tag` in tfvars, build/push that exact
+URI first, then review/apply the job change. Read `ingest_image_uri` only after
+state reflects that tag; for subsequent releases you can form the new URI from
+the existing registry/repository plus the tfvars tag without applying an
+unpublished image. Do not apply an enabled job pointing to an image not yet
+pushed. Keep releases serialized; immutable tags preserve rollbacks.
+
+To stop future launches, set `scheduler_paused = true` and review/apply; this
+does not cancel active executions. Setting `enable_ingest_job = false` removes
+the job, schedule, scheduler identity and grant (subject to deletion protection),
+but keeps the repository. PROD protection requires an explicit reviewed change
+before deleting the job. Repository cleanup is asynchronous and tagged images
+continue to consume storage.
+
 ## Telegram alert secret
 
 The `alert-telegram` secret holds one JSON object:
@@ -224,7 +457,9 @@ if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
 $env:IMPERSONATE_SERVICE_ACCOUNT = $sa
 $env:PROJECT_ID = 'dep-2610-dev'
 $env:RAW_BUCKET = 'dep-2610-dev-raw'
-$env:S3_REGION = 'us-west-2'
+$env:SOURCE_BUCKET = 'ookla-open-data'
+$env:SOURCE_REGION = 'us-west-2'
+Remove-Item Env:\S3_REGION -ErrorAction SilentlyContinue
 $env:MIN_QUARTER = '2023-Q3'
 & app\.venv\Scripts\python.exe -m ingest sync --type mobile --dry-run
 if ($LASTEXITCODE -ne 0) { throw 'Preview failed.' }
@@ -324,7 +559,7 @@ abort, and unchanged/changed ETag decisions are idempotent.
 Live transfer, Cloud Run execution and regional source coverage have not been
 verified by the assistant. Only local mocked tests were run.
 
-## Curated build (step 06)
+## Curated build
 
 Commands are **PowerShell 7 on Windows**, repository root. Reuse the raw-ingestion
 environment and impersonation setup above. Raw GCS objects must have sync

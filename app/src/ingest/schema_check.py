@@ -6,6 +6,8 @@ import pyarrow as pa
 import pyarrow.fs as fs
 import pyarrow.parquet as pq
 
+from ingest.config import SourceConfig
+
 MAX_FOOTER_BYTES = 16 * 1024 * 1024
 
 
@@ -31,9 +33,26 @@ def check_schema(actual: pa.Schema, schema_path: Path) -> None:
         raise ValueError("Incompatible source Parquet schema: " + "; ".join(failures))
 
 
-def check_source(source_fs: fs.FileSystem, key: str, expected_size: int, schema_path: Path) -> None:
+def source_filesystem(source_config: SourceConfig) -> fs.S3FileSystem:
+    # SOURCE_ENDPOINT applies to HTTPS only; Arrow always uses bucket + region.
+    return fs.S3FileSystem(
+        anonymous=True,
+        region=source_config.region,
+        connect_timeout=10,
+        request_timeout=120,
+        retry_strategy=fs.AwsStandardS3RetryStrategy(max_attempts=4),
+    )
+
+
+def check_source(
+    source_fs: fs.FileSystem,
+    source_config: SourceConfig,
+    key: str,
+    expected_size: int,
+    schema_path: Path,
+) -> None:
     # Read exactly the trailer and metadata range, never row groups.
-    with source_fs.open_input_file("ookla-open-data/" + key) as stream:
+    with source_fs.open_input_file(source_config.arrow_path(key)) as stream:
         size = stream.size()
         if size != expected_size or size < 12:
             raise ValueError(f"Source size changed or invalid Parquet file: {key}; rediscover.")

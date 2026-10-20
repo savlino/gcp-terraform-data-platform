@@ -2,14 +2,14 @@ import logging
 import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from urllib.parse import quote
 
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from ingest.config import SourceConfig
+
 LOGGER = logging.getLogger(__name__)
-SOURCE_ROOT = "https://ookla-open-data.s3.amazonaws.com/"
 TIMEOUT = (10, 120)
 KEY_PATTERN = re.compile(
     r"parquet/performance/type=(mobile|fixed)/year=([0-9]{4})/"
@@ -26,6 +26,7 @@ class SourceObject:
     filename: str
     etag: str
     size: int
+    url: str
 
     @property
     def destination(self) -> str:
@@ -33,10 +34,6 @@ class SourceObject:
             f"ookla/type={self.network_type}/year={self.year}/"
             f"quarter={self.quarter}/{self.filename}"
         )
-
-    @property
-    def url(self) -> str:
-        return SOURCE_ROOT + quote(self.key, safe="/")
 
 
 def opaque_etag(value: str) -> str:
@@ -57,13 +54,16 @@ def http_session() -> requests.Session:
 
 
 def discover(
-    session: requests.Session, network_type: str, min_quarter: tuple[int, int]
+    session: requests.Session,
+    source_config: SourceConfig,
+    network_type: str,
+    min_quarter: tuple[int, int],
 ) -> list[SourceObject]:
     params = {"list-type": "2", "prefix": f"parquet/performance/type={network_type}/"}
     found: dict[str, SourceObject] = {}
     tokens: set[str] = set()
     while True:
-        with session.get(SOURCE_ROOT, params=params, timeout=TIMEOUT) as response:
+        with session.get(source_config.endpoint + "/", params=params, timeout=TIMEOUT) as response:
             response.raise_for_status()
             root = ET.fromstring(response.content)
         for item in root.findall("{*}Contents"):
@@ -82,7 +82,9 @@ def discover(
             size = int(item.findtext("{*}Size", "-1"))
             if not etag or size <= 0:
                 raise ValueError(f"Missing ETag or positive size for {key}")
-            source = SourceObject(key, layer, year, quarter, filename, etag, size)
+            source = SourceObject(
+                key, layer, year, quarter, filename, etag, size, source_config.object_url(key)
+            )
             if key in found and found[key] != source:
                 raise ValueError(f"Source changed during pagination: {key}; rerun sync.")
             found[key] = source

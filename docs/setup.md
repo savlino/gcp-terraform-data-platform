@@ -90,7 +90,7 @@ The dataset is a quarterly public Parquet release under the `parquet/performance
   ```powershell
   $prefix = 'parquet/performance/type=mobile/'
   $encodedPrefix = [uri]::EscapeDataString($prefix)
-  $url = "https://ookla-open-data.s3.amazonaws.com/?list-type=2&delimiter=%2F&prefix=$encodedPrefix"
+  $url = "https://ookla-open-data.s3.us-west-2.amazonaws.com/?list-type=2&delimiter=%2F&prefix=$encodedPrefix"
   [xml]$listing = (Invoke-WebRequest -Uri $url -ErrorAction Stop).Content
   $listing.ListBucketResult.CommonPrefixes.Prefix
   ```
@@ -100,7 +100,7 @@ The dataset is a quarterly public Parquet release under the `parquet/performance
   ```powershell
   $prefix = 'parquet/performance/type=mobile/year=2026/'
   $encodedPrefix = [uri]::EscapeDataString($prefix)
-  $url = "https://ookla-open-data.s3.amazonaws.com/?list-type=2&delimiter=%2F&prefix=$encodedPrefix"
+  $url = "https://ookla-open-data.s3.us-west-2.amazonaws.com/?list-type=2&delimiter=%2F&prefix=$encodedPrefix"
   [xml]$listing = (Invoke-WebRequest -Uri $url -ErrorAction Stop).Content
   $listing.ListBucketResult.CommonPrefixes.Prefix
   ```
@@ -111,7 +111,7 @@ The dataset is a quarterly public Parquet release under the `parquet/performance
   ```powershell
   $prefix = 'parquet/performance/type=mobile/year=2026/quarter=1/'
   $encodedPrefix = [uri]::EscapeDataString($prefix)
-  $url = "https://ookla-open-data.s3.amazonaws.com/?list-type=2&prefix=$encodedPrefix"
+  $url = "https://ookla-open-data.s3.us-west-2.amazonaws.com/?list-type=2&prefix=$encodedPrefix"
   [xml]$listing = (Invoke-WebRequest -Uri $url -ErrorAction Stop).Content
   $listing.ListBucketResult.Contents | Select-Object Key, Size, ETag
   ```
@@ -123,7 +123,7 @@ The dataset is a quarterly public Parquet release under the `parquet/performance
   if (-not $object) { throw 'No objects were returned for the selected quarter.' }
   $key = [string]$object.Key
   $encodedKey = (($key -split '/') | ForEach-Object { [uri]::EscapeDataString($_) }) -join '/'
-  $head = Invoke-WebRequest -Method Head -Uri "https://ookla-open-data.s3.amazonaws.com/$encodedKey" -ErrorAction Stop
+  $head = Invoke-WebRequest -Method Head -Uri "https://ookla-open-data.s3.us-west-2.amazonaws.com/$encodedKey" -ErrorAction Stop
   $head.StatusCode
   $head.Headers['Content-Length']
   $head.Headers['ETag']

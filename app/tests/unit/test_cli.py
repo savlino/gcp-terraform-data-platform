@@ -6,6 +6,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from ingest import __main__ as cli
+from ingest import schema_check
+from ingest.build_config import BuildConfig
 from ingest.config import Config, parse_quarter
 from ingest.state import Decision
 
@@ -18,6 +20,8 @@ def environment(monkeypatch, schema_path):
     monkeypatch.delenv("IMPERSONATE_SERVICE_ACCOUNT", raising=False)
     monkeypatch.delenv("MIN_QUARTER", raising=False)
     monkeypatch.delenv("S3_REGION", raising=False)
+    for name in ("SOURCE_BUCKET", "SOURCE_REGION", "SOURCE_ENDPOINT"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.mark.parametrize("value", ["2023-Q2", "2022-Q4", "2024-Q5", "bad"])
@@ -68,6 +72,37 @@ def test_explicit_relative_schema_path_preserved(environment, monkeypatch, tmp_p
     assert Config.from_env().schema_path.read_text(encoding="utf-8") == "[]"
 
 
+@pytest.mark.parametrize(
+    ("factory", "override", "filename"),
+    [
+        (Config.from_env, "SOURCE_SCHEMA_PATH", "ookla_raw.json"),
+        (BuildConfig.from_env, "NATIVE_SCHEMA_PATH", "ookla_tiles.json"),
+    ],
+)
+def test_schemas_directory_and_explicit_override(
+    environment, monkeypatch, tmp_path, factory, override, filename
+):
+    monkeypatch.delenv(override, raising=False)
+    monkeypatch.setenv("SCHEMAS_DIR", str(tmp_path / "schemas"))
+    assert factory().schema_path == tmp_path / "schemas" / filename
+    monkeypatch.setenv(override, "custom.json")
+    assert str(factory().schema_path) == "custom.json"
+
+
+@pytest.mark.parametrize(
+    "factory,override",
+    [
+        (Config.from_env, "SOURCE_SCHEMA_PATH"),
+        (BuildConfig.from_env, "NATIVE_SCHEMA_PATH"),
+    ],
+)
+def test_empty_schemas_directory_rejected(environment, monkeypatch, factory, override):
+    monkeypatch.delenv(override, raising=False)
+    monkeypatch.setenv("SCHEMAS_DIR", " ")
+    with pytest.raises(ValueError, match="SCHEMAS_DIR is set but empty"):
+        factory()
+
+
 def test_missing_explicit_schema_fails_before_cloud_access(environment, monkeypatch, tmp_path):
     monkeypatch.setenv("SOURCE_SCHEMA_PATH", str(tmp_path / "missing.json"))
     monkeypatch.setattr("sys.argv", ["ingest", "sync", "--dry-run"])
@@ -88,7 +123,7 @@ def setup_cli(monkeypatch, source, argv):
     footer, transfer, s3 = MagicMock(), MagicMock(), MagicMock()
     monkeypatch.setattr(cli, "check_source", footer)
     monkeypatch.setattr(cli, "transfer", transfer)
-    monkeypatch.setattr(cli.fs, "S3FileSystem", s3)
+    monkeypatch.setattr(schema_check.fs, "S3FileSystem", s3)
     return footer, transfer, s3
 
 
@@ -181,11 +216,26 @@ def test_json_logging_shape():
     assert result["timestamp"]
 
 
-def test_s3_region_is_configurable(environment, monkeypatch, source):
-    monkeypatch.setenv("S3_REGION", "us-east-1")
-    _, _, s3 = setup_cli(monkeypatch, source, ["--type", "mobile"])
+def test_source_bucket_and_region_reach_listing_and_footer(environment, monkeypatch, source):
+    monkeypatch.setenv("SOURCE_BUCKET", "mirror-bucket")
+    monkeypatch.setenv("SOURCE_REGION", "us-east-1")
+    footer, _, s3 = setup_cli(monkeypatch, source, ["--type", "mobile"])
+    listed = MagicMock(return_value=[source])
+    monkeypatch.setattr(cli, "discover", listed)
     assert cli.main() == 0
+    listing_config = listed.call_args.args[1]
+    footer_config = footer.call_args.args[1]
+    assert listing_config is footer_config
+    assert (listing_config.bucket, listing_config.region) == ("mirror-bucket", "us-east-1")
+    assert listing_config.endpoint == "https://mirror-bucket.s3.us-east-1.amazonaws.com"
+    assert footer_config.arrow_path("a/b.parquet") == "mirror-bucket/a/b.parquet"
     assert s3.call_args.kwargs["region"] == "us-east-1"
+
+
+def test_renamed_s3_region_variable_is_rejected(environment, monkeypatch):
+    monkeypatch.setenv("S3_REGION", "us-east-1")
+    with pytest.raises(ValueError, match="renamed to SOURCE_REGION"):
+        Config.from_env()
 
 
 def test_missing_environment_fails_with_nonzero_exit(environment, monkeypatch):
@@ -297,8 +347,10 @@ def test_build_cli_flags_credentials_and_alert_gating(environment, monkeypatch, 
     assert alert.call_count == (0 if dry_run else 1)
 
 
-def test_failed_build_returns_nonzero_and_sends_failure_summary(environment, monkeypatch):
-    monkeypatch.setattr("sys.argv", ["ingest", "build"])
+@pytest.mark.parametrize("command", ["build", "run"])
+def test_failed_build_returns_nonzero_and_sends_failure_summary(environment, monkeypatch, command):
+    monkeypatch.setattr("sys.argv", ["ingest", command])
+    monkeypatch.setattr(cli, "sync_files", MagicMock())
     monkeypatch.setattr(cli, "application_credentials", lambda config: MagicMock())
     monkeypatch.setattr(cli.storage, "Client", MagicMock())
     monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
@@ -352,3 +404,66 @@ def test_startup_logs_effective_configuration_without_secrets(environment, monke
     monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
     monkeypatch.setattr(cli, "build", MagicMock())
     assert cli.main() == 0
+
+
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_run_sync_then_build_with_shared_scope(environment, monkeypatch, source, dry_run):
+    footer, upload, _ = setup_cli(monkeypatch, source, [])
+    args = ["ingest", "run", "--type", "mobile", "--quarter", "2023-Q3", "--force"]
+    if dry_run:
+        args.append("--dry-run")
+    monkeypatch.setattr("sys.argv", args)
+    credentials = MagicMock()
+    monkeypatch.setattr(cli, "application_credentials", lambda config: credentials)
+    monkeypatch.setattr(cli.storage, "Client", MagicMock())
+    monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
+    operation, alert, order = MagicMock(), MagicMock(), MagicMock()
+    order.attach_mock(footer, "footer")
+    order.attach_mock(upload, "upload")
+    order.attach_mock(operation, "build")
+    monkeypatch.setattr(cli, "build", operation)
+    monkeypatch.setattr(cli, "notify", alert)
+    assert cli.main() == 0
+    assert [call[0] for call in order.mock_calls] == (
+        ["build"] if dry_run else ["footer", "upload", "build"]
+    )
+    assert operation.call_args.args[-4:] == ("mobile", (2023, 3), True, dry_run)
+    assert alert.call_count == (0 if dry_run else 1)
+
+
+def test_run_sync_failure_stops_before_build(environment, monkeypatch, source):
+    footer, upload, _ = setup_cli(monkeypatch, source, [])
+    monkeypatch.setattr("sys.argv", ["ingest", "run", "--type", "mobile"])
+    footer.side_effect = ValueError("Schema mismatch")
+    operation, bq, credentials = MagicMock(), MagicMock(), MagicMock()
+    monkeypatch.setattr(cli, "build", operation)
+    monkeypatch.setattr(cli.bigquery, "Client", bq)
+    monkeypatch.setattr(cli, "application_credentials", credentials)
+    assert cli.main() == 1
+    upload.assert_not_called()
+    operation.assert_not_called()
+    bq.assert_not_called()
+    credentials.assert_not_called()
+
+
+def test_run_invalid_build_config_fails_before_sync(environment, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ingest", "run"])
+    monkeypatch.setenv("MAXIMUM_BYTES_BILLED", "0")
+    operation = MagicMock()
+    monkeypatch.setattr(cli, "sync_files", operation)
+    assert cli.main() == 1
+    operation.assert_not_called()
+
+
+def test_run_defaults_to_all_types_and_no_limit(environment, monkeypatch):
+    monkeypatch.setattr("sys.argv", ["ingest", "run"])
+    sync, operation = MagicMock(), MagicMock()
+    monkeypatch.setattr(cli, "sync_files", sync)
+    monkeypatch.setattr(cli, "application_credentials", lambda config: MagicMock())
+    monkeypatch.setattr(cli.storage, "Client", MagicMock())
+    monkeypatch.setattr(cli.bigquery, "Client", MagicMock())
+    monkeypatch.setattr(cli, "build", operation)
+    monkeypatch.setattr(cli, "notify", MagicMock())
+    assert cli.main() == 0
+    assert sync.call_args.args[1:] == ("all", None, None, False)
+    assert operation.call_args.args[-4:] == ("all", None, False, False)

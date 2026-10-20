@@ -1,0 +1,16 @@
+**
+!app/
+!app/Dockerfile
+!app/pyproject.toml
+!app/src/
+!app/src/**
+!schemas/
+!schemas/*.json
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/.venv/
+**/*credentials*.json
+**/adc.json
+**/*.pem
+**/*.key

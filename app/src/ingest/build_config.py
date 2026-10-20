@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from ingest.config import schema_path
+
 
 @dataclass(frozen=True)
 class BuildConfig:
@@ -52,10 +54,5 @@ class BuildConfig:
             zoom,
             percent,
             ceiling,
-            Path(
-                os.environ.get(
-                    "NATIVE_SCHEMA_PATH",
-                    str(Path(__file__).resolve().parents[3] / "schemas" / "ookla_tiles.json"),
-                )
-            ),
+            schema_path("ookla_tiles.json", "NATIVE_SCHEMA_PATH"),
         )

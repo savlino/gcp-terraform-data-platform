@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(autouse=True)
 def no_cloud_or_http(monkeypatch):
+    monkeypatch.delenv("SCHEMAS_DIR", raising=False)
+
     def forbidden(*args, **kwargs):
         raise AssertionError("Unit tests must not use network or ADC.")
 
@@ -43,6 +45,8 @@ def source():
         "test.parquet",
         "opaque-multipart-etag-7",
         12,
+        "https://ookla-open-data.s3.us-west-2.amazonaws.com/"
+        "parquet/performance/type=mobile/year=2023/quarter=3/test.parquet",
     )
 
 

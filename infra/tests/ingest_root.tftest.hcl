@@ -1,0 +1,120 @@
+mock_provider "google" {
+  mock_resource "google_service_account" {
+    override_during = plan
+    defaults = {
+      email = "ingest-scheduler@dep-2610-dev.iam.gserviceaccount.com"
+    }
+  }
+}
+
+override_resource {
+  target          = module.iam.google_service_account.ingest_runtime
+  override_during = plan
+  values = {
+    email = "ingest-runtime@dep-2610-dev.iam.gserviceaccount.com"
+  }
+}
+
+override_resource {
+  target          = module.secrets.google_secret_manager_secret.alert_webhook
+  override_during = plan
+  values = {
+    id = "projects/dep-2610-dev/secrets/alert-telegram"
+  }
+}
+
+variables {
+  project_id          = "dep-2610-dev"
+  env                 = "dev"
+  deletion_protection = false
+  image_tag           = "root-test-v1"
+  enable_ingest_job   = true
+  region_bbox         = { min_lon = -10, max_lon = 5, min_lat = 35, max_lat = 44 }
+  min_quarter         = "2024-Q1"
+  app_settings = {
+    source_bucket        = "ookla-mirror"
+    source_region        = "us-east-1"
+    maximum_bytes_billed = 123456789
+    mart_zoom            = 9
+    minimum_row_percent  = 65
+    latency_ceiling_ms   = 9000
+    source_schema_path   = "/app/schemas/ookla_raw.json"
+    native_schema_path   = "/app/schemas/ookla_tiles.json"
+  }
+}
+
+run "dev_wiring" {
+  command = plan
+
+  assert {
+    condition = (
+      output.ingest_image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-dev/dev-ingest/ingest:root-test-v1" &&
+      output.ingest_job_name == "dev-ingest" &&
+      output.scheduler_job_name == "dev-ingest-weekly" &&
+      output.runtime_service_account_email != output.scheduler_service_account_email
+    )
+    error_message = "The root must expose the tagged image and distinct runtime/scheduler identities."
+  }
+}
+
+run "test_paused_by_default" {
+  command = plan
+  variables {
+    env = "test"
+  }
+}
+
+run "prod_paused_by_default" {
+  command = plan
+  variables {
+    env                 = "prod"
+    deletion_protection = true
+  }
+}
+
+run "explicit_dev_pause" {
+  command = plan
+  variables {
+    scheduler_paused = true
+  }
+}
+
+run "invalid_quality_threshold" {
+  command = plan
+  variables {
+    app_settings = { minimum_row_percent = 101 }
+  }
+  expect_failures = [var.app_settings]
+}
+
+run "invalid_query_budget" {
+  command = plan
+  variables {
+    app_settings = { maximum_bytes_billed = 0 }
+  }
+  expect_failures = [var.app_settings]
+}
+
+run "invalid_schema_directory" {
+  command = plan
+  variables {
+    app_settings = { schemas_dir = "" }
+  }
+  expect_failures = [var.app_settings]
+}
+
+run "invalid_source_bucket" {
+  command = plan
+  variables {
+    app_settings = { source_bucket = "evil.example/x" }
+  }
+  expect_failures = [var.app_settings]
+}
+
+run "invalid_source_region" {
+  command = plan
+  variables {
+    app_settings = { source_region = "" }
+  }
+  expect_failures = [var.app_settings]
+}

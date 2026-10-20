@@ -1,6 +1,19 @@
-env        = "dev"
-project_id = "dep-2610-dev"
-region     = "europe-southwest1"
+env              = "dev"
+project_id       = "dep-2610-dev"
+region           = "europe-southwest1"
+scheduler_region = "europe-west1"
+image_tag        = "v1"
+
+# Enable only after pushing image_tag to the Terraform-created repository.
+enable_ingest_job = false
+scheduler_paused  = false
+
+app_settings = {
+  maximum_bytes_billed = 10737418240
+  mart_zoom            = 10
+  minimum_row_percent  = 50
+  latency_ceiling_ms   = 10000
+}
 
 region_bbox = {
   min_lon = -9.6

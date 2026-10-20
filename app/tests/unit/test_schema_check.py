@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from ingest.config import SourceConfig
 from ingest.schema_check import check_schema, check_source
 
 
@@ -26,7 +27,7 @@ def test_missing_column_in_synthetic_parquet_fails(source_schema, schema_path, m
     filesystem = MagicMock()
     filesystem.open_input_file.return_value = SizedBytes(data)
     with pytest.raises(ValueError, match=rf"{missing_column}: missing"):
-        check_source(filesystem, "synthetic.parquet", len(data), schema_path)
+        check_source(filesystem, SourceConfig(), "synthetic.parquet", len(data), schema_path)
 
 
 class SizedBytes(io.BytesIO):
@@ -48,13 +49,22 @@ def test_only_footer_is_read(source_schema, schema_path):
     stream = SizedBytes(data)
     filesystem = MagicMock()
     filesystem.open_input_file.return_value = stream
-    check_source(filesystem, "synthetic.parquet", len(data), schema_path)
+    check_source(filesystem, SourceConfig(), "synthetic.parquet", len(data), schema_path)
     assert len(stream.reads) == 2
     assert stream.reads[0] == (len(data) - 8, 8)
     footer_start, footer_length = stream.reads[1]
     assert footer_start > 4
     assert footer_start + footer_length == len(data) - 8
     filesystem.open_input_file.assert_called_once_with("ookla-open-data/synthetic.parquet")
+
+
+def test_footer_read_uses_configured_bucket(source_schema, schema_path):
+    data = parquet_bytes(source_schema)
+    filesystem = MagicMock()
+    filesystem.open_input_file.return_value = SizedBytes(data)
+    mirror = SourceConfig(bucket="mirror-bucket", region="us-east-1")
+    check_source(filesystem, mirror, "k/synthetic.parquet", len(data), schema_path)
+    filesystem.open_input_file.assert_called_once_with("mirror-bucket/k/synthetic.parquet")
 
 
 def test_compatible_old_and_new_source_types(source_schema, schema_path):
@@ -85,14 +95,14 @@ def test_changed_size_fails_before_footer_read(source_schema, schema_path):
     filesystem = MagicMock()
     filesystem.open_input_file.return_value = SizedBytes(data)
     with pytest.raises(ValueError, match="Source size changed"):
-        check_source(filesystem, "synthetic.parquet", len(data) + 1, schema_path)
+        check_source(filesystem, SourceConfig(), "synthetic.parquet", len(data) + 1, schema_path)
 
 
 def test_invalid_trailer_rejected(schema_path):
     filesystem = MagicMock()
     filesystem.open_input_file.return_value = SizedBytes(b"not parquet at all")
     with pytest.raises(ValueError, match="Invalid Parquet trailer"):
-        check_source(filesystem, "synthetic.parquet", 18, schema_path)
+        check_source(filesystem, SourceConfig(), "synthetic.parquet", 18, schema_path)
 
 
 def test_raw_contract_matches_native_source_columns(schema_path):
@@ -109,5 +119,5 @@ def test_oversized_footer_is_rejected_before_allocation(schema_path):
     stream = SizedBytes(data)
     filesystem.open_input_file.return_value = stream
     with pytest.raises(ValueError, match="oversized"):
-        check_source(filesystem, "synthetic.parquet", len(data), schema_path)
+        check_source(filesystem, SourceConfig(), "synthetic.parquet", len(data), schema_path)
     assert stream.reads == [(len(data) - 8, 8)]

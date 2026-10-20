@@ -15,6 +15,53 @@ permissions and must be checked separately.
 | Same runtime | `roles/bigquery.jobUser` | Environment project | Submit query jobs (`bigquery.jobs.create`); jobs belong to projects, so this cannot be a dataset grant. Data access remains separately scoped. |
 | Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
 | Explicit `developer_principal` | `roles/iam.serviceAccountTokenCreator` | That runtime service account only, non-PROD | Local keyless impersonation; absent by default (`null`) and always absent in PROD. |
+| `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
+
+The runtime receives no invocation grant. Only the scheduler gets an explicit
+invoker grant in this configuration; administrators or inherited policies may
+still allow other callers. A live 403 check must target `jobs:run` itself, not
+just a failed job-description read. See the
+[scheduled ingestion checks](runbook.md#scheduled-cloud-run-ingestion).
+The app receives `ALERT_SECRET` as a non-secret resource name and fetches the
+latest payload through the Secret Manager API; Cloud Run secret injection is
+not used. Normal Cloud Run/Scheduler service agents and publisher/deployer
+permissions are prerequisites, not new project-level workload grants.
+
+## Deployment permission: attaching service accounts
+
+Creating or updating a Cloud Run job with an attached runtime account requires
+`iam.serviceAccounts.actAs` on that runtime account. Creating or updating the
+Scheduler OAuth target also requires this permission on `ingest-scheduler`.
+An unrestricted project Owner normally has it; the WIF-authenticated CI deployer
+does not acquire it merely by being able to impersonate its own CI account.
+
+An authorized administrator must grant the CI apply service account
+`roles/iam.serviceAccountUser` on **each of these two service accounts**, not on
+the project. Token Creator and job Invoker are not substitutes for `actAs`.
+These deployer grants are prerequisites, not runtime/scheduler workload grants
+and are not created by this module.
+
+**PowerShell on Windows**, after the service accounts exist:
+
+```powershell
+$project = 'dep-2610-dev'
+$ciApply = Read-Host 'CI Terraform apply service account email'
+if (-not $ciApply) { throw 'CI apply service account email is empty' }
+$runtime = terraform -chdir=infra output -raw runtime_service_account_email
+if ($LASTEXITCODE -ne 0 -or -not $runtime) { throw 'Runtime SA output is missing' }
+$scheduler = "ingest-scheduler@$project.iam.gserviceaccount.com"
+foreach ($account in @($runtime, $scheduler)) {
+  gcloud iam service-accounts add-iam-policy-binding $account --project=$project "--member=serviceAccount:$ciApply" --role=roles/iam.serviceAccountUser
+  if ($LASTEXITCODE -ne 0) { throw "Cannot grant CI actAs on $account" }
+}
+```
+
+For first provisioning, an authorized administrator must create/apply the
+service accounts and establish these grants before CI creates the job and
+schedule. Repository-only setup does not create the scheduler account; a CI-only
+first apply cannot rely on a grant to a not-yet-existing account. Keep the
+schedule paused during this handover. Repeat resource-scoped grants separately
+in each environment; do not use service-account keys.
 
 No basic roles are granted. `objectCreator` plus `objectViewer` is intentionally
 not used because it cannot overwrite an existing object. Object User is broader
@@ -43,10 +90,11 @@ terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -out=dev.tfplan
 ```
 
-For a fresh deployment, expect 13 additions with the developer grant, or 12
-with the default null principal. If previous plans were already applied without
-drift, new apply adds only two resources: a secret container and its IAM member.
-Review any unrelated changes before applying.
+For a fresh deployment, repository-only configuration creates 13 resources
+(14 with the developer grant). Enabling scheduled ingestion adds four more.
+For an existing deployment, review the incremental plan rather than assuming a
+fixed addition count. Follow the [image-first sequence](runbook.md#scheduled-cloud-run-ingestion)
+before enabling the job. Review any unrelated changes before applying.
 
 ```powershell
 terraform -chdir=infra apply dev.tfplan

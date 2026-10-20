@@ -2,24 +2,43 @@
 
 This root composes [raw storage](../modules/storage/README.md),
 [BigQuery](../modules/bigquery/README.md), [runtime IAM](../modules/iam/README.md)
-and [webhook secret](../modules/secrets/README.md).
+and [Telegram secret](../modules/secrets/README.md), plus
+[scheduled ingestion](../modules/ingest_job/README.md).
 The bucket and dataset receive the same `region`. Only DEV environment files are
-supplied. It creates twelve resources by default: one bucket, one dataset, three
-native tables, one external table, one runtime service account, one secret and four IAM members.
+supplied. Repository-only setup creates thirteen resources: one bucket, one dataset,
+three native tables, one external table, one runtime service account, one secret,
+four IAM members and one Artifact Registry repository. Enabling ingestion adds
+four resources: Cloud Run Job, scheduler service account, job-scoped invoker member
+and Scheduler job.
 An explicit non-PROD `developer_principal` adds one service-account IAM member.
 
 ## Configuration
 
+- `scheduler_region` defaults to `europe-west1` independently of `region`.
+  It is used only by Scheduler; Cloud Run, Artifact Registry and data remain in Madrid.
+  See the [placement decision](../docs/architecture.md#scheduler-region-decision).
+
 - [DEV variables](env/dev.tfvars): project, region, bounding box, minimum quarter,
-  retention and destroy flags. `region_bbox` and `min_quarter` are validated
-  configuration for the future app; they do not filter or load anything yet.
+  retention, destroy flags and `image_tag`. `region_bbox`, `min_quarter` and typed
+  `app_settings` are passed as non-secret app env vars along with module outputs.
+- `enable_ingest_job = false` initially creates the registry without a job.
+  Push the image before changing it to true. `image_tag` is required from tfvars;
+  tags are immutable, so choose a new unique tag for each changed image.
+- `scheduler_paused = null` defaults to active in DEV and paused in TEST/PROD;
+  DEV tfvars explicitly selects active. It has no effect until the job is enabled.
+- Task defaults: 1 vCPU, 1024 MiB, 3600 seconds, zero retries; configurable memory,
+  deadline and retry count (0 or 1). The weekly schedule is Monday 06:00
+  Europe/Madrid, following daylight saving time. These are initial streaming estimates, not measured
+  source-file sizing. See [module limitations](../modules/ingest_job/README.md).
 - [DEV backend](env/dev.gcs.tfbackend): the existing ops bucket with prefix
   `infra/dev`. Bootstrap keeps its separate `bootstrap` prefix.
 - Separate projects and backend prefixes isolate environment IAM, costs and
   state. [CLI workspaces](https://developer.hashicorp.com/terraform/cli/workspaces)
   do not provide that separation. Use the default workspace, not a workspace
   per environment; use a separate working directory for each environment.
-- Standard labels are applied to the bucket, dataset, all tables and secret.
+- Standard labels are applied to every supporting resource, including the
+  registry, Cloud Run job and executions. Scheduler and service accounts do not
+  support labels in this provider.
 - DEV allows bucket/dataset contents to be destroyed and disables Terraform
   table deletion protection. Future PROD variables must reverse those flags.
 - No dataset default table expiration is set. Raw objects expire after 30 days
@@ -31,8 +50,8 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
 - `ext_ookla_raw` uses Parquet autodetection and typed CUSTOM Hive partitions.
-  Raw Parquet files must exist before applying this table. No network, app, scheduler
-  or CI resources are part of current implementation.
+  Raw Parquet files must exist before applying this table. No network or CI
+  resources are part of the current implementation.
 
 ## Prerequisites and authentication
 
@@ -48,6 +67,8 @@ Do not run apply until you have reviewed the plan.
    object access on the ops state bucket and permissions to manage DEV buckets,
    datasets and tables, plus service-account creation and IAM get/set permissions
    for the runtime grants, plus secret creation and secret IAM management.
+   Scheduled ingestion also needs repository/job/schedule management, job IAM
+   get/set and `iam.serviceAccounts.actAs` on runtime/scheduler identities.
    Scope grants to the intended resources where possible;
    bucket/dataset creation also needs the corresponding project permissions.
 3. Set `$sa` to that account's email (do not use a key file), then authenticate:
@@ -76,13 +97,17 @@ terraform fmt -check -recursive modules
 terraform -chdir=infra validate
 terraform -chdir=infra test
 & .\infra\tests\check-secret-plan.ps1
+& .\infra\tests\check-ingest-plan.ps1
 ```
 
-Expected: valid configuration and `21 passed, 0 failed`. Tests mock Google:
+Expected: valid configuration and `38 passed, 0 failed`. Tests mock Google:
 they check naming, schemas, labels, partition filters, retention, destroy flags
 and input validation. They do not prove deployed resources or API behavior.
 Negative tests include reversed/out-of-range/zero-area boxes, malformed quarters,
 quarters earlier than 2023 Q3 and zero retention.
+Ingestion tests also reject `latest`, invalid task limits, DQ settings and budgets.
+The root ingestion plan guard proves actual env wiring, independent locations,
+DEV/TEST/PROD pause defaults, API-only secret access and additive IAM.
 
 The [secret plan check](tests/check-secret-plan.ps1) also inspects the JSON plan
 from the secrets mock-provider test and rejects any
@@ -100,11 +125,11 @@ terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
 Expected workspace: `default`. For a fresh DEV state with the default null
-developer principal, expect **12 to add, 0 to
+developer principal and ingestion disabled, expect **13 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
 touches bootstrap, another environment, or includes network resources.
-If the previous infrastructure is already applied without drift, expect only one
-external-table addition. Preserve any configured developer principal on subsequent plans;
+If the previous infrastructure is already applied without drift, expect only the
+registry addition while ingestion is disabled. Preserve any configured developer principal on subsequent plans;
 see [security instructions](../docs/security.md).
 Review it before applying:
 
@@ -117,6 +142,12 @@ $LASTEXITCODE
 Expected second plan: **No changes**, exit code **0** (2 means changes, 1 means
 an error). Terraform outputs the raw bucket, dataset and table IDs. These cloud
 checks have not been run by the assistant.
+
+Do not enable the job until its image exists and the secret has a value.
+Follow the [scheduled Cloud Run runbook](../docs/runbook.md#scheduled-cloud-run-ingestion)
+for build/push, the second reviewed plan, execution and positive/negative checks.
+With immutable tags, cleanup targets only untagged leftovers older than seven
+days; tagged releases accumulate by design.
 
 ## Inspect the deployed resources
 

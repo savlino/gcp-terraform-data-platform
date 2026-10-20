@@ -5,7 +5,7 @@ variable "project_id" {
 
 variable "env" {
   type        = string
-  description = "Environment; developer impersonation is never granted in prod."
+  description = "Environment used to name the runtime identity."
 
   validation {
     condition     = contains(["dev", "test", "prod"], var.env)
@@ -21,18 +21,4 @@ variable "raw_bucket_name" {
 variable "dataset_id" {
   type        = string
   description = "Existing environment dataset ID, without a project prefix."
-}
-
-variable "developer_principal" {
-  type        = string
-  description = "Optional user:, group: or serviceAccount: email principal allowed to impersonate runtime outside prod."
-  default     = null
-
-  validation {
-    condition = var.developer_principal == null ? true : can(regex(
-      "^(user|group|serviceAccount):[^@\\s:]+@[^@\\s:]+\\.[^@\\s:]+$",
-      var.developer_principal
-    ))
-    error_message = "developer_principal must be null or a user:, group: or serviceAccount: email principal."
-  }
 }

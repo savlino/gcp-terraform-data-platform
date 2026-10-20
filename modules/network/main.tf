@@ -4,7 +4,6 @@ locals {
     env        = var.env
     managed_by = "terraform"
   }
-  grant_demo_access = var.enable_iap_demo_vm && var.developer_principal != null && var.env != "prod"
 }
 
 resource "google_compute_network" "private" {
@@ -103,30 +102,4 @@ resource "google_compute_instance" "iap_demo" {
   }
 
   depends_on = [google_compute_firewall.deny_ingress, google_compute_firewall.iap_ssh]
-}
-
-resource "google_iap_tunnel_instance_iam_member" "developer" {
-  count = local.grant_demo_access ? 1 : 0
-
-  project  = var.project_id
-  zone     = google_compute_instance.iap_demo[0].zone
-  instance = google_compute_instance.iap_demo[0].name
-  role     = "roles/iap.tunnelResourceAccessor"
-  member   = var.developer_principal
-
-  condition {
-    title       = "ssh-only"
-    description = "Only SSH tunnels to this demo instance."
-    expression  = "destination.port == 22"
-  }
-}
-
-resource "google_compute_instance_iam_member" "developer_os_login" {
-  count = local.grant_demo_access ? 1 : 0
-
-  project       = var.project_id
-  zone          = google_compute_instance.iap_demo[0].zone
-  instance_name = google_compute_instance.iap_demo[0].name
-  role          = "roles/compute.osLogin"
-  member        = var.developer_principal
 }

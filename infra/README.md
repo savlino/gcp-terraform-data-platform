@@ -12,9 +12,9 @@ four IAM members, one Artifact Registry repository, a VPC, subnet and two
 firewall rules. Enabling ingestion adds
 four resources: Cloud Run Job, scheduler service account, job-scoped invoker member
 and Scheduler job.
-An explicit non-PROD `developer_principal` adds one service-account IAM member.
-The optional demo adds one VM and, when a non-PROD developer is set, two
-instance-scoped IAM members.
+The optional demo adds one VM. Human access is managed only by the locally
+applied [bootstrap](../bootstrap/README.md#gitlab-federation-and-human-access),
+not by this root or CI-managed child modules.
 
 ## Configuration
 
@@ -24,9 +24,9 @@ instance-scoped IAM members.
   DEV explicitly uses `europe-southwest1-a`. The European `e2-micro` is billable;
   enable only for supervised testing and disable/apply immediately afterward.
   Cloud Run is not attached to this VPC. No NAT or connector is added.
-- The developer gets instance-scoped IAP SSH and OS Login only when the VM is
-  enabled, the principal is set and env is not PROD. An Owner's inherited access
-  does not replace these deliberate grants. See [network runbook](../docs/runbook.md#private-network-and-iap-demo).
+- Bootstrap can grant a developer project-level Token Creator and IAP access in
+  DEV/TEST only. OS Login/discovery permissions are separate prerequisites.
+  See [network runbook](../docs/runbook.md#private-network-and-iap-demo).
 - `scheduler_region` defaults to `europe-west1` independently of `region`.
   It is used only by Scheduler; Cloud Run, Artifact Registry and data remain in Madrid.
   See the [placement decision](../docs/architecture.md#scheduler-region-decision).
@@ -45,8 +45,9 @@ instance-scoped IAM members.
   source-file sizing. See [module limitations](../modules/ingest_job/README.md).
 - [DEV backend](env/dev.gcs.tfbackend): the existing ops bucket with prefix
   `infra/dev`. Bootstrap keeps its separate `bootstrap` prefix.
-- Separate projects and backend prefixes isolate environment IAM, costs and
-  state. [CLI workspaces](https://developer.hashicorp.com/terraform/cli/workspaces)
+- Separate projects and backend prefixes separate environment resources, costs and
+  state paths, but bucket-wide CI Object User access does **not** isolate those
+  state paths from one another. [CLI workspaces](https://developer.hashicorp.com/terraform/cli/workspaces)
   do not provide that separation. Use the default workspace, not a workspace
   per environment; use a separate working directory for each environment.
 - Standard labels are applied to every supporting resource, including the
@@ -58,13 +59,14 @@ instance-scoped IAM members.
 - No dataset default table expiration is set. Raw objects expire after 30 days
   in DEV; BigQuery native data does not expire automatically.
 - Runtime IAM uses bucket-scoped Object User, dataset-scoped Data Editor and
-  project-scoped Job User. Developer impersonation defaults to disabled and is
-  never granted in PROD. See [security checks](../docs/security.md).
+  project-scoped Job User. Human impersonation grants are bootstrap-owned and
+  absent in PROD. See [security checks](../docs/security.md).
 - The `alert-telegram` secret has user-managed replication in `region` and a
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
 - `ext_ookla_raw` pins `schemas/ookla_raw.json` and uses typed CUSTOM Hive
-  partitions. No CI resources are part of the current implementation.
+  partitions. DEV MR plans use the bootstrap-owned WIF plan identity; no CI apply
+  jobs are configured yet.
 
 ## Prerequisites and authentication
 
@@ -83,7 +85,7 @@ Do not run apply until you have reviewed the plan.
    Scheduled ingestion also needs repository/job/schedule management, job IAM
    get/set and `iam.serviceAccounts.actAs` on runtime/scheduler identities.
    Network deployment needs VPC/subnet/firewall management; the optional demo
-   also needs instance/disk creation/deletion and instance/IAP-tunnel IAM get/set.
+   also needs instance/disk creation/deletion. Human grants are not infra resources.
    Scope grants to the intended resources where possible;
    bucket/dataset creation also needs the corresponding project permissions.
 3. Set `$sa` to that account's email (do not use a key file), then authenticate:

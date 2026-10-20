@@ -1,0 +1,175 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - when: never
+
+stages: [lint, test, plan, policy, apply]
+
+variables:
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  TF_VERSION: "1.16.5"
+  GCP_OPS_PROJECT_ID: "dep-2610-ops"
+  TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.terraform-plugin-cache"
+
+default:
+  interruptible: true
+
+.terraform:
+  image:
+    name: hashicorp/terraform:1.16.5
+    entrypoint: [""]
+  cache:
+    key:
+      prefix: "terraform-1.16.5-linux-amd64"
+      files: [infra/.terraform.lock.hcl, bootstrap/.terraform.lock.hcl]
+    paths: [.terraform-plugin-cache/]
+  before_script:
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
+
+fmt:
+  extends: .terraform
+  stage: lint
+  script:
+    - terraform fmt -check -recursive bootstrap
+    - terraform fmt -check -recursive infra
+    - terraform fmt -check -recursive modules
+
+validate:
+  extends: .terraform
+  stage: lint
+  script:
+    - terraform -chdir=bootstrap init -backend=false -lockfile=readonly
+    - terraform -chdir=bootstrap validate
+    - terraform -chdir=infra init -backend=false -lockfile=readonly
+    - terraform -chdir=infra validate
+
+tflint:
+  stage: lint
+  image:
+    name: ghcr.io/terraform-linters/tflint:v0.64.0
+    entrypoint: [""]
+  script:
+    - tflint --recursive --config="$CI_PROJECT_DIR/.tflint.hcl" --format=compact
+
+terraform-test:
+  extends: .terraform
+  stage: test
+  script:
+    - terraform -chdir=bootstrap init -backend=false -lockfile=readonly
+    - terraform -chdir=bootstrap test
+    - terraform -chdir=infra init -backend=false -lockfile=readonly
+    - terraform -chdir=infra test
+
+.wif:
+  extends: .terraform
+  image:
+    name: gcr.io/google.com/cloudsdktool/google-cloud-cli:588.0.0-stable
+    entrypoint: [""]
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: "https://iam.googleapis.com/projects/${GCP_OPS_PROJECT_NUMBER}/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com"
+  variables:
+    CI_ENV: "dev"
+    CI_SA_KIND: "plan"
+  before_script:
+    - |
+      set -eu
+      : "${GCP_OPS_PROJECT_NUMBER:?Set the non-secret ops project number in GitLab}"
+      case "$GCP_OPS_PROJECT_NUMBER" in *[!0-9]*|"") exit 1 ;; esac
+      apt-get update
+      apt-get install -y --no-install-recommends ca-certificates curl unzip
+      mkdir -p "$TF_PLUGIN_CACHE_DIR" "$CI_PROJECT_DIR/.ci-auth"
+      chmod 700 "$CI_PROJECT_DIR/.ci-auth"
+      export CLOUDSDK_CONFIG="$CI_PROJECT_DIR/.ci-auth/gcloud"
+      export GOOGLE_APPLICATION_CREDENTIALS="$CI_PROJECT_DIR/.ci-auth/wif.json"
+      umask 077
+      printf '%s' "$GITLAB_OIDC_TOKEN" > "$CI_PROJECT_DIR/.ci-auth/token"
+      unset GITLAB_OIDC_TOKEN
+      WIF_PROVIDER="projects/$GCP_OPS_PROJECT_NUMBER/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com"
+      gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+        --service-account="ci-${CI_SA_KIND}-${CI_ENV}@${GCP_OPS_PROJECT_ID}.iam.gserviceaccount.com" \
+        --credential-source-file="$CI_PROJECT_DIR/.ci-auth/token" \
+        --output-file="$GOOGLE_APPLICATION_CREDENTIALS"
+      TF_INSTALL_DIR=$(mktemp -d)
+      TF_ARCHIVE="terraform_${TF_VERSION}_linux_amd64.zip"
+      TF_CHECKSUMS="terraform_${TF_VERSION}_SHA256SUMS"
+      TF_RELEASE="https://releases.hashicorp.com/terraform/${TF_VERSION}"
+      curl --fail --silent --show-error --location "$TF_RELEASE/$TF_ARCHIVE" -o "$TF_INSTALL_DIR/$TF_ARCHIVE"
+      curl --fail --silent --show-error --location "$TF_RELEASE/$TF_CHECKSUMS" -o "$TF_INSTALL_DIR/$TF_CHECKSUMS"
+      (cd "$TF_INSTALL_DIR" && sha256sum --check --ignore-missing "$TF_CHECKSUMS")
+      unzip -q "$TF_INSTALL_DIR/$TF_ARCHIVE" terraform -d /usr/local/bin
+      rm -f "$TF_INSTALL_DIR/$TF_ARCHIVE" "$TF_INSTALL_DIR/$TF_CHECKSUMS"
+      rmdir "$TF_INSTALL_DIR"
+  after_script:
+    - rm -f "$CI_PROJECT_DIR/.ci-auth/token" "$CI_PROJECT_DIR/.ci-auth/wif.json" "$CI_PROJECT_DIR/.ci-auth/plan.json" "$CI_PROJECT_DIR/.ci-auth/auth.log"
+    - rm -rf "$CI_PROJECT_DIR/.ci-auth/gcloud"
+
+plan:dev:
+  extends: .wif
+  stage: plan
+  resource_group: terraform-dev
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  script:
+    - terraform -chdir=infra init -lockfile=readonly -backend-config=env/dev.gcs.tfbackend
+    - terraform -chdir=infra plan -lock-timeout=120s -var-file=env/dev.tfvars -out=dev.tfplan
+  artifacts:
+    access: maintainer
+    expire_in: 1 day
+    paths: [infra/dev.tfplan]
+
+policy:dev:
+  stage: policy
+  image: python:3.12-slim
+  needs:
+    - job: plan:dev
+      artifacts: true          # takes infra/dev.plan.json from plan:dev
+  interruptible: true          # a newer push to the MR cancels this run
+  script:
+    - test -f infra/dev.plan.json || { echo "dev.plan.json is missing: plan:dev did not produce it"; exit 1; }
+    - python scripts/check_plan.py infra/dev.plan.json
+
+apply:dev:
+  needs: [plan:dev, policy:dev]
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+  resource_group: dev          # never two applies to dev at once
+  environment:
+    name: dev
+  script:
+    - cd infra
+    - terraform init -input=false -backend-config=env/dev.gcs.tfbackend
+    - terraform apply -input=false dev.tfplan
+
+verify:unprotected-apply-denied:
+  extends: .wif
+  stage: test
+  variables:
+    CI_SA_KIND: "apply"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID && $CI_COMMIT_REF_PROTECTED == "false"'
+      when: manual
+      allow_failure: true
+  script:
+    - |
+      set -eu
+      gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+        --service-account="ci-plan-${CI_ENV}@${GCP_OPS_PROJECT_ID}.iam.gserviceaccount.com" \
+        --credential-source-file="$CI_PROJECT_DIR/.ci-auth/token" \
+        --output-file="$CI_PROJECT_DIR/.ci-auth/plan.json"
+      gcloud auth login --cred-file="$CI_PROJECT_DIR/.ci-auth/plan.json" --quiet
+      gcloud auth print-access-token --quiet > /dev/null
+      if gcloud auth login --cred-file="$GOOGLE_APPLICATION_CREDENTIALS" --quiet > "$CI_PROJECT_DIR/.ci-auth/auth.log" 2>&1 &&
+         gcloud auth print-access-token --quiet > /dev/null 2> "$CI_PROJECT_DIR/.ci-auth/auth.log"; then
+        echo "ERROR: unprotected token unexpectedly impersonated the apply identity"
+        exit 1
+      fi
+      if ! grep -q 'iam.serviceAccounts.getAccessToken' "$CI_PROJECT_DIR/.ci-auth/auth.log"; then
+        echo "ERROR: authentication failed for a reason other than the expected permission denial"
+        exit 1
+      fi
+      echo "PASS: unprotected-ref token cannot impersonate ci-apply-dev"

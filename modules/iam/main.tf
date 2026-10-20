@@ -25,11 +25,3 @@ resource "google_project_iam_member" "query_jobs" {
   role    = "roles/bigquery.jobUser"
   member  = "serviceAccount:${google_service_account.ingest_runtime.email}"
 }
-
-resource "google_service_account_iam_member" "developer_token_creator" {
-  count = var.developer_principal != null && var.env != "prod" ? 1 : 0
-
-  service_account_id = google_service_account.ingest_runtime.name
-  role               = "roles/iam.serviceAccountTokenCreator"
-  member             = var.developer_principal
-}

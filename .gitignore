@@ -5,6 +5,8 @@
 *.tfplan
 crash.log
 crash.*.log
+.terraform-plugin-cache/
+.ci-auth/
 
 # Python
 __pycache__/

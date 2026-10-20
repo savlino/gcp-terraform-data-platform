@@ -5,7 +5,7 @@ variable "project_id" {
 
 variable "env" {
   type        = string
-  description = "Environment name; developer access is never granted in prod."
+  description = "Environment name for resource naming and labels."
 
   validation {
     condition     = contains(["dev", "test", "prod"], var.env)
@@ -56,19 +56,5 @@ variable "demo_vm_zone" {
   validation {
     condition     = can(regex("^[a-z]+-[a-z]+[0-9]+-[a-z]$", var.demo_vm_zone)) && startswith(var.demo_vm_zone, "${var.region}-")
     error_message = "demo_vm_zone must be a zone within region."
-  }
-}
-
-variable "developer_principal" {
-  type        = string
-  description = "Optional developer email principal for instance-scoped IAP and OS Login outside prod."
-  default     = null
-
-  validation {
-    condition = var.developer_principal == null ? true : can(regex(
-      "^(user|group|serviceAccount):[^@\\s:]+@[^@\\s:]+\\.[^@\\s:]+$",
-      var.developer_principal
-    ))
-    error_message = "developer_principal must be null or a user:, group: or serviceAccount: email principal."
   }
 }

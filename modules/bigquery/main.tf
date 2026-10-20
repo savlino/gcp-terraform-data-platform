@@ -45,11 +45,12 @@ resource "google_bigquery_table" "ext_ookla_raw" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.network_perf.dataset_id
   table_id            = "ext_ookla_raw"
+  schema              = file("${path.module}/../../schemas/ookla_raw.json")
   deletion_protection = var.deletion_protection
   labels              = local.labels
 
   external_data_configuration {
-    autodetect    = true
+    autodetect    = false
     source_format = "PARQUET"
     source_uris   = ["gs://${var.raw_bucket_name}/ookla/*"]
 

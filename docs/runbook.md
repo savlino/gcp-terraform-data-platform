@@ -15,7 +15,7 @@ schedule. Do not use routine `-target` applies or a placeholder public image.
 ### 1. Prerequisites and repository-first apply
 
 Infra, ingest and transform must already be deployed and verified, including
-raw Parquet for external-table autodetection, native tables, runtime grants and
+raw Parquet aligned with the pinned external-table schema, native tables, runtime grants and
 an enabled `alert-telegram` version. Confirm the existing bootstrap API
 configuration has actually enabled `run.googleapis.com`,
 `artifactregistry.googleapis.com`, `cloudscheduler.googleapis.com`,

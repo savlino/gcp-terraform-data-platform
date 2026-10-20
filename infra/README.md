@@ -49,9 +49,8 @@ An explicit non-PROD `developer_principal` adds one service-account IAM member.
 - The `alert-telegram` secret has user-managed replication in `region` and a
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
-- `ext_ookla_raw` uses Parquet autodetection and typed CUSTOM Hive partitions.
-  Raw Parquet files must exist before applying this table. No network or CI
-  resources are part of the current implementation.
+- `ext_ookla_raw` pins `schemas/ookla_raw.json` and uses typed CUSTOM Hive
+  partitions. No network or CI resources are part of the current implementation.
 
 ## Prerequisites and authentication
 
@@ -166,8 +165,8 @@ prevention enforced, 30-day delete rule; dataset in the same region without
 Curated and mart tables have DAY partitioning on `quarter_start` with
 `requirePartitionFilter: true`. The load log is unpartitioned.
 
-The external table must show PARQUET, autodetection, the raw source URI and
-CUSTOM Hive options with `requirePartitionFilter: true`. To verify in GCP,
+The external table must show PARQUET, the pinned source schema, the raw source
+URI and CUSTOM Hive options with `requirePartitionFilter: true`. To verify in GCP,
 use a quarter already uploaded to raw storage:
 
 ```powershell
@@ -179,10 +178,9 @@ bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe
 if ($LASTEXITCODE -eq 0) { throw 'External query without a partition filter was accepted.' }
 ```
 
-The negative query must fail for a missing Hive partition filter, not permissions,
-schema incompatibility or a billing cap. Each query is capped at 1 GiB billed;
-LIMIT does not itself bound scanned bytes. Mixed physical Parquet types across
-quarters are not normalized by autodetection and remain a cloud-verification risk.
+The negative query must fail for a missing Hive partition filter, not permissions
+or a billing cap. Each query is capped at 1 GiB billed; LIMIT does not itself
+bound scanned bytes.
 
 Positive partition-filter query (empty result is expected before ingestion):
 

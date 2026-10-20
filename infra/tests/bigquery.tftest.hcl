@@ -19,16 +19,17 @@ run "native_tables" {
     condition = (
       google_bigquery_table.ext_ookla_raw.table_id == "ext_ookla_raw" &&
       google_bigquery_table.ext_ookla_raw.dataset_id == google_bigquery_dataset.network_perf.dataset_id &&
+      google_bigquery_table.ext_ookla_raw.schema == file("${path.root}/../../schemas/ookla_raw.json") &&
       !google_bigquery_table.ext_ookla_raw.deletion_protection &&
       google_bigquery_table.ext_ookla_raw.labels == google_bigquery_dataset.network_perf.labels &&
-      one(google_bigquery_table.ext_ookla_raw.external_data_configuration).autodetect &&
+      !one(google_bigquery_table.ext_ookla_raw.external_data_configuration).autodetect &&
       one(google_bigquery_table.ext_ookla_raw.external_data_configuration).source_format == "PARQUET" &&
       toset(one(google_bigquery_table.ext_ookla_raw.external_data_configuration).source_uris) == toset(["gs://${var.raw_bucket_name}/ookla/*"]) &&
       one(one(google_bigquery_table.ext_ookla_raw.external_data_configuration).hive_partitioning_options).mode == "CUSTOM" &&
       one(one(google_bigquery_table.ext_ookla_raw.external_data_configuration).hive_partitioning_options).source_uri_prefix == "gs://${var.raw_bucket_name}/ookla/{type:STRING}/{year:INTEGER}/{quarter:INTEGER}" &&
       one(one(google_bigquery_table.ext_ookla_raw.external_data_configuration).hive_partitioning_options).require_partition_filter
     )
-    error_message = "External table must use the supplied bucket, PARQUET autodetection and typed CUSTOM Hive partitions with a required filter."
+    error_message = "External table must pin the shared source schema, use the supplied bucket and typed CUSTOM Hive partitions with a required filter."
   }
 
   assert {

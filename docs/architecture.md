@@ -98,9 +98,10 @@ this job only, an OAuth access token and the v2 Jobs `:run` endpoint.
 
 ## Curated build pipeline
 
-Terraform defines `ext_ookla_raw` with Parquet autodetection, typed CUSTOM Hive
-partitions and a required Hive partition filter. Raw files must exist for
-schema inference; live creation and mixed-schema queries remain unverified.
+Terraform defines `ext_ookla_raw` with a pinned shared schema
+([schemas/ookla_raw.json](../schemas/ookla_raw.json)), typed CUSTOM Hive
+partitions and a required Hive partition filter. This avoids autodetect drift
+across source quarters; live creation and queries remain unverified.
 The sync application does not create or query the external table.
 
 The separate `build` command compares GCS `source_etag` metadata with the latest

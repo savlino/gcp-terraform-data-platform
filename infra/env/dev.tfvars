@@ -2,16 +2,17 @@ env              = "dev"
 project_id       = "dep-2610-dev"
 region           = "europe-southwest1"
 scheduler_region = "europe-west1"
-image_tag        = "v1"
+image_tag        = "83ac391"
 
 # Enable only after pushing image_tag to the Terraform-created repository.
-enable_ingest_job = false
-scheduler_paused  = false
+enable_ingest_job = true
+scheduler_paused  = true
 
+# Full DEV DQ baseline: docs/data-quality.md (2026-10-20).
 app_settings = {
   maximum_bytes_billed = 10737418240
   mart_zoom            = 10
-  minimum_row_percent  = 50
+  minimum_row_percent  = 80
   latency_ceiling_ms   = 10000
 }
 

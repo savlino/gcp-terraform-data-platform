@@ -6,6 +6,60 @@ There are no service-account keys. All grants use additive `*_iam_member`
 resources; inherited organization/folder/project policies still affect effective
 permissions and must be checked separately.
 
+## Plan policy checks
+
+[scripts/check_plan.py](../scripts/check_plan.py) checks the JSON representation
+of a **whole environment** plan, not a targeted plan. It uses Python 3.12 and the
+standard library only, accepts UTF-8 with or without a PowerShell BOM, and
+examines only `resource_changes` entries with `mode == "managed"`.
+
+| ID | Check | Applies to |
+| --- | --- | --- |
+| P0 | At least one managed resource change and one `google_bigquery_dataset`; otherwise "check would pass vacuously". | Whole plan, including no-op managed entries |
+| P1 | No `google_secret_manager_secret_version`; secret values must never enter state. | All managed changes, including deletes |
+| P2 | No `google_service_account_key`. | All managed changes, including deletes |
+| P3 | No resource type ending in `_iam_binding` or `_iam_policy`. | All managed changes, including deletes |
+| P4 | No `roles/owner`, `roles/editor` or `roles/viewer` in `role`. | Non-null `after` |
+| P5 | No `allUsers` or `allAuthenticatedUsers` in `member` or any `members` item. | Non-null `after` |
+| P6 | `public_access_prevention == "enforced"` and `uniform_bucket_level_access == true`. | Buckets with non-null `after` |
+| P7 | No `0.0.0.0/0` in `source_ranges` for a non-empty ingress `allow`; omitted direction means INGRESS. Deny-only rules are allowed. | Firewalls with non-null `after` |
+| P8 | Every `network_interface` has empty `access_config`. | Instances with non-null `after` |
+| P9 | If `labels` is present, require `project`, `env`, `managed_by` keys and `labels.env == --env`; ignore `effective_labels` and `terraform_labels`. | Non-null `after` containing labels |
+| P10 | No delete/replace of bucket, dataset, table, secret container or Artifact Registry repository without intentional override. | Actions containing `delete`, including delete/create replacements |
+| P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. | Non-null `after`, PROD only |
+
+P4-P9 and P11 ignore deletes (`after == null`); P10 inspects delete actions.
+Unknown required fields in `after_unknown`, including nested values, and missing
+computed fields emit `SKIP [Pn] address: ... unknown until apply`. A known
+violation is still reported when another value is unknown. Missing mandatory
+label keys are violations, not computed attributes. A skip is not proof of
+compliance; review it before apply and verify effective permissions separately.
+
+**PowerShell on Windows**, from the repository root, after generating a complete
+saved DEV plan:
+
+```powershell
+terraform -chdir=infra show -json dev.tfplan > plan.json
+if ($LASTEXITCODE -ne 0) { throw 'Cannot export plan JSON' }
+python .\scripts\check_plan.py .\plan.json --env dev --junit policy-dev.xml
+```
+
+Exit codes: `0` no violations (possibly skips), `1` policy violations, `2`
+input/usage/report-write errors. Output lists findings and a checked/violated/
+skipped summary. For deliberate destructive work only, `--allow-destroy` or
+`ALLOW_DESTROY=true` disables **P10 only**. Do not enable this globally in CI.
+P1/P2/P3 continue rejecting forbidden resources even during destruction.
+
+JUnit contains one testcase for each P0-P11. Failures name every violating
+address. A rule with skips and no failures is skipped; when both occur, failure
+takes precedence and skipped details remain in `system-out`.
+`policy:dev` consumes the full DEV plan artifact, passes `--env dev`, and publishes
+the restricted one-day JUnit report even on policy failure. Its rules match the
+plan job so fork MRs cannot depend on a missing cloud plan. `python:lint-test`
+runs the app unit suite, synthetic policy tests and Ruff in Python 3.12.
+No real plan or credential is a test fixture; JSON plans can contain sensitive
+state and must not be committed. Local synthetic checks do not verify a live MR.
+
 ## Configured grants
 
 | Identity | Role | Scope | Why |

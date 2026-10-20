@@ -116,10 +116,11 @@ plan:dev:
   script:
     - terraform -chdir=infra init -lockfile=readonly -backend-config=env/dev.gcs.tfbackend
     - terraform -chdir=infra plan -lock-timeout=120s -var-file=env/dev.tfvars -out=dev.tfplan
+    - terraform -chdir=infra show -json dev.tfplan > dev.plan.json
   artifacts:
     access: maintainer
     expire_in: 1 day
-    paths: [infra/dev.tfplan]
+    paths: [infra/dev.tfplan, infra/dev.plan.json]
 
 policy:dev:
   stage: policy

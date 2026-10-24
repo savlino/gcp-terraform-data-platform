@@ -1,3 +1,35 @@
+variable "gitlab_project_path" {
+  type        = string
+  description = "Exact case-sensitive GitLab.com namespace/project path authorized to federate."
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+$", var.gitlab_project_path))
+    error_message = "gitlab_project_path must be a namespace/project path without URL, trailing slash or quotes."
+  }
+}
+
+variable "ci_environments" {
+  type        = set(string)
+  description = "Environment CI accounts/grants to provision; start with DEV until other environment files exist."
+  default     = ["dev"]
+
+  validation {
+    condition     = length(var.ci_environments) > 0 && alltrue([for env in var.ci_environments : contains(["dev", "test", "prod"], env)])
+    error_message = "ci_environments must be a non-empty subset of dev, test and prod."
+  }
+}
+
+variable "developer_principal" {
+  type        = string
+  description = "Optional human user:/group: email principal granted project-level Token Creator and IAP tunnel access in DEV and TEST only."
+  default     = null
+
+  validation {
+    condition     = var.developer_principal == null ? true : can(regex("^(user|group):[^@\\s:]+@[^@\\s:]+\\.[^@\\s:]+$", var.developer_principal))
+    error_message = "developer_principal must be null or a user:/group: email principal, not a workload identity."
+  }
+}
+
 variable "ops_project_id" {
   type        = string
   description = "Project ID used for bootstrap resources and Terraform state."

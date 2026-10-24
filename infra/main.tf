@@ -1,13 +1,12 @@
 module "network" {
   source = "../modules/network"
 
-  project_id          = var.project_id
-  env                 = var.env
-  region              = var.region
-  subnet_cidr         = var.subnet_cidr != null ? var.subnet_cidr : { dev = "10.10.0.0/24", test = "10.20.0.0/24", prod = "10.30.0.0/24" }[var.env]
-  demo_vm_zone        = var.demo_vm_zone != null ? var.demo_vm_zone : "${var.region}-a"
-  enable_iap_demo_vm  = var.enable_iap_demo_vm
-  developer_principal = var.developer_principal
+  project_id         = var.project_id
+  env                = var.env
+  region             = var.region
+  subnet_cidr        = var.subnet_cidr != null ? var.subnet_cidr : { dev = "10.10.0.0/24", test = "10.20.0.0/24", prod = "10.30.0.0/24" }[var.env]
+  demo_vm_zone       = var.demo_vm_zone != null ? var.demo_vm_zone : "${var.region}-a"
+  enable_iap_demo_vm = var.enable_iap_demo_vm
 }
 
 module "storage" {
@@ -34,11 +33,10 @@ module "bigquery" {
 module "iam" {
   source = "../modules/iam"
 
-  project_id          = var.project_id
-  env                 = var.env
-  raw_bucket_name     = module.storage.raw_bucket_name
-  dataset_id          = module.bigquery.dataset_id
-  developer_principal = var.developer_principal
+  project_id      = var.project_id
+  env             = var.env
+  raw_bucket_name = module.storage.raw_bucket_name
+  dataset_id      = module.bigquery.dataset_id
 }
 
 module "secrets" {

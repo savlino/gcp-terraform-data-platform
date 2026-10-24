@@ -18,13 +18,12 @@ The deny source `0.0.0.0/0` is a deny, never a public SSH allow.
 | `subnet_cidr` | Required canonical RFC1918 IPv4 CIDR, /8 through /29, fully inside a private range |
 | `demo_vm_zone` | Required zone in `region`; root defaults to `${region}-a` |
 | `enable_iap_demo_vm` | `false`; creates a billable VM only when explicitly enabled |
-| `developer_principal` | `null`; email principal for demo access, only when VM enabled and env is not PROD |
 
 The root resolves CIDR defaults to DEV `10.10.0.0/24`, TEST `10.20.0.0/24`
 and PROD `10.30.0.0/24`. An explicit `subnet_cidr` overrides the default.
 Only DEV environment files are supplied; this step does not deploy TEST/PROD.
 
-## Optional VM and IAM
+## Optional VM and access prerequisites
 
 The demo uses `e2-micro`, a 10 GiB `pd-standard` Debian 12 boot disk, and the
 selected region's `a` zone by default (`europe-southwest1-a` for DEV).
@@ -34,19 +33,15 @@ integrity monitoring. OS Login is enabled, project SSH keys are blocked and
 serial port access is disabled. VM and auto-deleting boot disk have all standard
 labels; network/subnet/firewall resources do not support labels in Google 8.7.0.
 
-For an explicitly set `developer_principal`, only while the VM exists and
-`env != "prod"`, additive grants provide:
-
-- `google_iap_tunnel_instance_iam_member`: `roles/iap.tunnelResourceAccessor`
-  on this instance, conditioned on `destination.port == 22`.
-- `google_compute_instance_iam_member`: `roles/compute.osLogin` on this instance,
-  for non-admin Linux login. Tunnel authorization alone does not grant login.
-
-There are no project IAM grants, basic roles, policies or authoritative bindings
-in this module. Existing Owner/inherited access does not replace these explicit
-demo grants or prove their effectiveness in isolation. Discovery permissions
-needed by gcloud (`compute.projects.get` and instance lookup/listing) are separate
-operator prerequisites; they are not added as a broad project role here.
+This module manages no human IAM. The locally applied
+[bootstrap](../../bootstrap/README.md#gitlab-federation-and-human-access) grants
+an optional human principal project-level IAP access in DEV/TEST only, independent
+of the VM flag. The firewall still permits only IAP TCP 22 to tagged VMs.
+OS Login authorization is a separate existing/manual prerequisite; this
+repository no longer creates a human OS Login grant. An Owner's effective access
+does not prove the explicit tunnel grant works in isolation.
+Discovery permissions needed by gcloud (`compute.projects.get` and instance
+lookup/listing) are also operator prerequisites.
 See [OS Login roles](https://docs.cloud.google.com/compute/docs/oslogin/set-up-oslogin)
 and [IAP TCP forwarding](https://docs.cloud.google.com/iap/docs/using-tcp-forwarding).
 
@@ -77,6 +72,6 @@ import/delete the auto-created `default` network.
 
 Plan-only tests with a mock Google provider cover CIDRs, regional routing,
 rule names/logging, the invariant that no rule allows `0.0.0.0/0`, default-off
-compute, Shielded/private VM settings, narrow IAM, PROD exclusion and invalid inputs:
+compute, Shielded/private VM settings and invalid inputs:
 [network.tftest.hcl](../../infra/tests/network.tftest.hcl).
 No live networking or SSH behavior is claimed from those tests.

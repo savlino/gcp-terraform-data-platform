@@ -109,12 +109,6 @@ variable "delete_contents_on_destroy" {
   default     = false
 }
 
-variable "developer_principal" {
-  type        = string
-  description = "Optional email IAM principal for runtime impersonation and enabled demo IAP/OS Login; ignored in prod. Validated by child modules."
-  default     = null
-}
-
 variable "subnet_cidr" {
   type        = string
   description = "Private IPv4 subnet CIDR; null selects dev 10.10.0.0/24, test 10.20.0.0/24 or prod 10.30.0.0/24. Validated by network."

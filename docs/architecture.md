@@ -179,17 +179,32 @@ without a VPC connector or direct VPC egress configuration.
 Only `enable_iap_demo_vm = true` creates the private Shielded `e2-micro` demo.
 DEV zone is `europe-southwest1-a`; modules receive region/zone as inputs.
 The VM has OS Login, no external IP or attached service account, and an
-auto-deleting boot disk. An explicitly configured non-PROD developer receives
-instance-scoped IAP tunnel and OS Login grants only while the VM exists.
-PROD never gets these developer grants. The flag defaults false because
+auto-deleting boot disk. Locally applied bootstrap can grant an explicit human
+principal project-level Token Creator and IAP access in DEV/TEST, independent of
+the VM flag; CI-managed infra has no human access input or resources. OS Login
+authorization remains a separate prerequisite. PROD gets no bootstrap human
+grants. The flag defaults false because
 European VM/disk usage is billable; disable and apply immediately after testing.
 The default network must be removed manually, not by Terraform.
 See [verification and cleanup](runbook.md#private-network-and-iap-demo).
 
+## GitLab deployment identities
+
+Locally applied bootstrap owns the ops-project `gitlab` pool, `gitlab-com` OIDC
+provider and per-environment `ci-plan-*` / `ci-apply-*` accounts (DEV first).
+The provider checks the exact GitLab project path and explicit audience; plan
+trust selects that project and apply trust additionally requires a protected ref.
+GitLab jobs exchange short-lived ID tokens for SA credentials, never keys.
+MR lint/mock tests run without cloud credentials; same-project DEV plans use
+the plan identity. There are no apply jobs yet. Shared state-bucket access and
+the breadth of predefined deployment roles are deliberate limitations, described
+in [security](security.md#gitlab-wif-and-ci-role-catalogue).
+
 ## Not implemented
 
 Live Cloud Run/Scheduler and private-network/IAP verification remain unverified;
-CI/CD and a distributed execution lock are not implemented. Raw files are global;
+live WIF/pipeline execution, CI applies and a distributed application execution
+lock are not verified/implemented. Raw files are global;
 regional filtering applies during the build and does not reduce global transfer.
 
 See the [runbook](runbook.md#raw-ingestion) for manual DEV verification

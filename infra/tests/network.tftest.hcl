@@ -77,8 +77,6 @@ run "private_network_without_vm" {
   assert {
     condition = (
       length(google_compute_instance.iap_demo) == 0 &&
-      length(google_iap_tunnel_instance_iam_member.developer) == 0 &&
-      length(google_compute_instance_iam_member.developer_os_login) == 0 &&
       output.iap_demo_vm_name == null
     )
     error_message = "No VM or demo IAM must exist by default."
@@ -119,94 +117,9 @@ run "enabled_shielded_vm" {
       google_compute_instance.iap_demo[0].boot_disk[0].auto_delete &&
       google_compute_instance.iap_demo[0].boot_disk[0].initialize_params[0].size == 10 &&
       google_compute_instance.iap_demo[0].boot_disk[0].initialize_params[0].type == "pd-standard" &&
-      google_compute_instance.iap_demo[0].boot_disk[0].initialize_params[0].labels == google_compute_instance.iap_demo[0].labels &&
-      length(google_iap_tunnel_instance_iam_member.developer) == 0 &&
-      length(google_compute_instance_iam_member.developer_os_login) == 0
+      google_compute_instance.iap_demo[0].boot_disk[0].initialize_params[0].labels == google_compute_instance.iap_demo[0].labels
     )
-    error_message = "Label VM and auto-deleting disk; a null principal must not receive IAM."
-  }
-}
-
-run "explicit_dev_access" {
-  command = plan
-  module {
-    source = "../modules/network"
-  }
-  variables {
-    enable_iap_demo_vm  = true
-    developer_principal = "user:developer@example.com"
-  }
-
-  assert {
-    condition = (
-      google_iap_tunnel_instance_iam_member.developer[0].instance == google_compute_instance.iap_demo[0].name &&
-      google_iap_tunnel_instance_iam_member.developer[0].zone == var.demo_vm_zone &&
-      google_iap_tunnel_instance_iam_member.developer[0].role == "roles/iap.tunnelResourceAccessor" &&
-      google_iap_tunnel_instance_iam_member.developer[0].member == var.developer_principal &&
-      google_iap_tunnel_instance_iam_member.developer[0].condition[0].expression == "destination.port == 22" &&
-      google_compute_instance_iam_member.developer_os_login[0].instance_name == google_compute_instance.iap_demo[0].name &&
-      google_compute_instance_iam_member.developer_os_login[0].role == "roles/compute.osLogin" &&
-      google_compute_instance_iam_member.developer_os_login[0].member == var.developer_principal
-    )
-    error_message = "Grant SSH-only tunnel and non-admin OS Login deliberately at instance scope."
-  }
-}
-
-run "prod_never_grants_developer" {
-  command = plan
-  module {
-    source = "../modules/network"
-  }
-  variables {
-    env                 = "prod"
-    enable_iap_demo_vm  = true
-    developer_principal = "user:developer@example.com"
-  }
-  assert {
-    condition = (
-      length(google_compute_instance.iap_demo) == 1 &&
-      length(google_iap_tunnel_instance_iam_member.developer) == 0 &&
-      length(google_compute_instance_iam_member.developer_os_login) == 0
-    )
-    error_message = "Even an explicitly enabled PROD demo must never grant developer access."
-  }
-}
-
-run "disabled_vm_never_grants_developer" {
-  command = plan
-  module {
-    source = "../modules/network"
-  }
-  variables {
-    developer_principal = "user:developer@example.com"
-  }
-  assert {
-    condition = (
-      length(google_compute_instance.iap_demo) == 0 &&
-      length(google_iap_tunnel_instance_iam_member.developer) == 0 &&
-      length(google_compute_instance_iam_member.developer_os_login) == 0
-    )
-    error_message = "A developer principal must not implicitly enable billable compute or orphan IAM."
-  }
-}
-
-run "test_developer_access" {
-  command = plan
-  module {
-    source = "../modules/network"
-  }
-  variables {
-    env                 = "test"
-    subnet_cidr         = "10.20.0.0/24"
-    enable_iap_demo_vm  = true
-    developer_principal = "group:developers@example.com"
-  }
-  assert {
-    condition = (
-      google_iap_tunnel_instance_iam_member.developer[0].member == var.developer_principal &&
-      google_compute_instance_iam_member.developer_os_login[0].member == var.developer_principal
-    )
-    error_message = "An explicit TEST developer must receive narrow demo access too."
+    error_message = "Label the VM and its auto-deleting disk."
   }
 }
 
@@ -263,15 +176,4 @@ run "reject_cross_region_zone" {
     demo_vm_zone = "europe-west1-b"
   }
   expect_failures = [var.demo_vm_zone]
-}
-
-run "reject_public_principal" {
-  command = plan
-  module {
-    source = "../modules/network"
-  }
-  variables {
-    developer_principal = "allUsers"
-  }
-  expect_failures = [var.developer_principal]
 }

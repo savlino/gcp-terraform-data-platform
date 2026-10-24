@@ -1,10 +1,16 @@
 # Terraform
 .terraform/
+# Custom TF_DATA_DIR copies hold provider binaries (~130 MB) and backend metadata.
+.terraform-*/
 *.tfstate
 *.tfstate.*
 *.tfplan
+*.plan.json
+policy-*.xml
 crash.log
 crash.*.log
+.terraform-plugin-cache/
+.ci-auth/
 
 # Python
 __pycache__/

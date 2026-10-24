@@ -11,7 +11,6 @@ resources do not support the standard resource labels.
 | `env` | `dev`, `test`, or `prod` | Required |
 | `raw_bucket_name` | Existing raw bucket, without `gs://` | Required |
 | `dataset_id` | Existing dataset in the project | Required |
-| `developer_principal` | `user:`, `group:` or `serviceAccount:` email principal | `null` |
 
 Output: `service_account_email`.
 
@@ -26,10 +25,9 @@ Query-job creation is project-level because jobs are project resources, not
 dataset resources. It does not grant access to other datasets. No project-level
 data editor, basic role or service-account key is created.
 
-`roles/iam.serviceAccountTokenCreator` is granted on this service account only
-when `developer_principal != null && env != "prod"`. A configured principal in
-PROD is ignored, not granted. This module does not revoke permissions inherited
-from other policies and does not make the runtime a Terraform deployer.
+This module manages no human access. Project-level DEV/TEST human Token Creator
+grants belong to the locally applied [bootstrap](../../bootstrap/README.md#gitlab-federation-and-human-access).
+No human PROD grants are configured there. The runtime is not a Terraform deployer.
 
 Do not combine the dataset IAM member with `google_bigquery_dataset_access`
 or explicit dataset `access` blocks. Dataset IAM resources also remove authorized

@@ -1,10 +1,64 @@
-# Runtime identity and least privilege
+# Identities, federation and least privilege
 
 This document describes Terraform configuration, not verified live permissions.
 The runtime account is separate from the existing Terraform deployment identity.
 There are no service-account keys. All grants use additive `*_iam_member`
 resources; inherited organization/folder/project policies still affect effective
 permissions and must be checked separately.
+
+## Plan policy checks
+
+[scripts/check_plan.py](../scripts/check_plan.py) checks the JSON representation
+of a **whole environment** plan, not a targeted plan. It uses Python 3.12 and the
+standard library only, accepts UTF-8 with or without a PowerShell BOM, and
+examines only `resource_changes` entries with `mode == "managed"`.
+
+| ID | Check | Applies to |
+| --- | --- | --- |
+| P0 | At least one managed resource change and one `google_bigquery_dataset`; otherwise "check would pass vacuously". | Whole plan, including no-op managed entries |
+| P1 | No `google_secret_manager_secret_version`; secret values must never enter state. | All managed changes, including deletes |
+| P2 | No `google_service_account_key`. | All managed changes, including deletes |
+| P3 | No resource type ending in `_iam_binding` or `_iam_policy`. | All managed changes, including deletes |
+| P4 | No `roles/owner`, `roles/editor` or `roles/viewer` in `role`. | Non-null `after` |
+| P5 | No `allUsers` or `allAuthenticatedUsers` in `member` or any `members` item. | Non-null `after` |
+| P6 | `public_access_prevention == "enforced"` and `uniform_bucket_level_access == true`. | Buckets with non-null `after` |
+| P7 | No `0.0.0.0/0` in `source_ranges` for a non-empty ingress `allow`; omitted direction means INGRESS. Deny-only rules are allowed. | Firewalls with non-null `after` |
+| P8 | Every `network_interface` has empty `access_config`. | Instances with non-null `after` |
+| P9 | If `labels` is present, require `project`, `env`, `managed_by` keys and `labels.env == --env`; ignore `effective_labels` and `terraform_labels`. | Non-null `after` containing labels |
+| P10 | No delete/replace of bucket, dataset, table, secret container or Artifact Registry repository without intentional override. | Actions containing `delete`, including delete/create replacements |
+| P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. | Non-null `after`, PROD only |
+
+P4-P9 and P11 ignore deletes (`after == null`); P10 inspects delete actions.
+Unknown required fields in `after_unknown`, including nested values, and missing
+computed fields emit `SKIP [Pn] address: ... unknown until apply`. A known
+violation is still reported when another value is unknown. Missing mandatory
+label keys are violations, not computed attributes. A skip is not proof of
+compliance; review it before apply and verify effective permissions separately.
+
+**PowerShell on Windows**, from the repository root, after generating a complete
+saved DEV plan:
+
+```powershell
+terraform -chdir=infra show -json dev.tfplan > plan.json
+if ($LASTEXITCODE -ne 0) { throw 'Cannot export plan JSON' }
+python .\scripts\check_plan.py .\plan.json --env dev --junit policy-dev.xml
+```
+
+Exit codes: `0` no violations (possibly skips), `1` policy violations, `2`
+input/usage/report-write errors. Output lists findings and a checked/violated/
+skipped summary. For deliberate destructive work only, `--allow-destroy` or
+`ALLOW_DESTROY=true` disables **P10 only**. Do not enable this globally in CI.
+P1/P2/P3 continue rejecting forbidden resources even during destruction.
+
+JUnit contains one testcase for each P0-P11. Failures name every violating
+address. A rule with skips and no failures is skipped; when both occur, failure
+takes precedence and skipped details remain in `system-out`.
+`policy:dev` consumes the full DEV plan artifact, passes `--env dev`, and publishes
+the restricted one-day JUnit report even on policy failure. Its rules match the
+plan job so fork MRs cannot depend on a missing cloud plan. `python:lint-test`
+runs the app unit suite, synthetic policy tests and Ruff in Python 3.12.
+No real plan or credential is a test fixture; JSON plans can contain sensitive
+state and must not be committed. Local synthetic checks do not verify a live MR.
 
 ## Configured grants
 
@@ -14,10 +68,9 @@ permissions and must be checked separately.
 | Same runtime | `roles/bigquery.dataEditor` | Environment `network_perf` dataset only | Populate native tables, maintain the load log and later create the external table. Does not grant project-level dataset creation. |
 | Same runtime | `roles/bigquery.jobUser` | Environment project | Submit query jobs (`bigquery.jobs.create`); jobs belong to projects, so this cannot be a dataset grant. Data access remains separately scoped. |
 | Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
-| Explicit `developer_principal` | `roles/iam.serviceAccountTokenCreator` | That runtime service account only, non-PROD | Local keyless impersonation; absent by default (`null`) and always absent in PROD. |
+| Bootstrap `developer_principal` | `roles/iam.serviceAccountTokenCreator` | DEV and TEST projects only | Optional human local impersonation; broad across all SAs in those projects, not ops CI accounts. Absent by default and never granted in PROD. |
 | `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
-| Explicit `developer_principal`, enabled demo only, non-PROD | `roles/iap.tunnelResourceAccessor` | Demo instance's IAP tunnel; `destination.port == 22` condition | Deliberate SSH tunnel authorization, even if the developer already has inherited Owner access. |
-| Same demo developer | `roles/compute.osLogin` | Demo instance only | Non-admin Linux login; IAP tunnel access alone does not authorize OS login. |
+| Same bootstrap human | `roles/iap.tunnelResourceAccessor` | DEV and TEST projects only, independent of VM flag | Deliberate tunnel authorization, even if inherited Owner access already exists. No explicit OS Login grant is managed by this repo. |
 
 ## Private network and IAP-only SSH
 
@@ -36,11 +89,12 @@ the deny; upstream hierarchical firewall policies still matter.
 The optional demo VM has no external IP, eliminating a directly routable
 internet SSH endpoint. IAP provides identity-authorized encrypted forwarding
 instead of maintaining a public-IP bastion, its patching and an always-on
-compute bill. The network tag controls firewall targeting, not IAM: IAP and
-OS Login permissions are deliberately bound to the actual instance. Neither
-grant is created when the principal is null, the VM is disabled, or env is PROD.
-This is not an organization-wide deny policy and cannot remove inherited Owner
-permissions. Test with a non-Owner account to isolate the explicit grants.
+compute bill. The network tag controls firewall targeting, not IAM. Bootstrap's
+optional human IAP grant is project-wide in DEV/TEST and remains when the VM is
+off. OS Login and Compute discovery permissions are existing/manual operator
+prerequisites, not grants made by CI-managed infra. No human grant is configured
+in PROD. This is not an organization-wide deny policy and cannot remove inherited
+Owner permissions. Test with a non-Owner account to isolate explicit grants.
 
 `enable_iap_demo_vm = false` by default. When enabled, the `e2-micro` in
 `europe-southwest1-a` uses Shielded Secure Boot/vTPM/integrity monitoring,
@@ -71,49 +125,90 @@ latest payload through the Secret Manager API; Cloud Run secret injection is
 not used. Normal Cloud Run/Scheduler service agents and publisher/deployer
 permissions are prerequisites, not new project-level workload grants.
 
-## Deployment permission: attaching service accounts
+## GitLab WIF and CI role catalogue
 
-Creating or updating a Cloud Run job with an attached runtime account requires
-`iam.serviceAccounts.actAs` on that runtime account. Creating or updating the
-Scheduler OAuth target also requires this permission on `ingest-scheduler`.
-An unrestricted project Owner normally has it; the WIF-authenticated CI deployer
-does not acquire it merely by being able to impersonate its own CI account.
+[Bootstrap federation](../bootstrap/wif.tf) is applied locally by an authorized
+administrator, never by the infrastructure CI pipeline. Pool `gitlab` and
+provider `gitlab-com` live in ops. The issuer is `https://gitlab.com`; the sole
+allowed ID-token audience is
+`https://iam.googleapis.com/projects/<ops-number>/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com`.
+Mappings are `google.subject = assertion.sub`, plus `attribute.project_path`,
+`attribute.ref` and `attribute.ref_protected` from their matching claims.
+The provider condition compares `assertion.project_path` to the configured
+`gitlab_project_path`. GitLab MR tokens identify the source project, so fork
+tokens do not satisfy this trust. Cloud plan jobs also exclude fork MRs.
 
-An authorized administrator must grant the CI apply service account
-`roles/iam.serviceAccountUser` on **each of these two service accounts**, not on
-the project. Token Creator and job Invoker are not substitutes for `actAs`.
-These deployer grants are prerequisites, not runtime/scheduler workload grants
-and are not created by this module.
+`ci-plan-<env>` and `ci-apply-<env>` live in ops; `ci_environments = ["dev"]`
+is the default. Each SA receives additive `roles/iam.workloadIdentityUser`:
 
-**PowerShell on Windows**, after the service accounts exist:
+- Plan: `principalSet://iam.googleapis.com/projects/<ops-number>/locations/global/workloadIdentityPools/gitlab/attribute.project_path/<path>`.
+- Apply: `principalSet://iam.googleapis.com/projects/<ops-number>/locations/global/workloadIdentityPools/gitlab/attribute.ref_protected/true`.
 
-```powershell
-$project = 'dep-2610-dev'
-$ciApply = Read-Host 'CI Terraform apply service account email'
-if (-not $ciApply) { throw 'CI apply service account email is empty' }
-$runtime = terraform -chdir=infra output -raw runtime_service_account_email
-if ($LASTEXITCODE -ne 0 -or -not $runtime) { throw 'Runtime SA output is missing' }
-$scheduler = "ingest-scheduler@$project.iam.gserviceaccount.com"
-foreach ($account in @($runtime, $scheduler)) {
-  gcloud iam service-accounts add-iam-policy-binding $account --project=$project "--member=serviceAccount:$ciApply" --role=roles/iam.serviceAccountUser
-  if ($LASTEXITCODE -ne 0) { throw "Cannot grant CI actAs on $account" }
-}
-```
+The apply selector relies on the provider's project-path condition. Keep this
+pool dedicated to this project: another provider in the same pool could widen
+trust. A protected ref is not necessarily `main`; review protected branch **and
+tag** rules. There are no CI apply jobs yet. These grants do not give the plan
+account permission to impersonate the apply account.
 
-For first provisioning, an authorized administrator must create/apply the
-service accounts and establish these grants before CI creates the job and
-schedule. Repository-only setup does not create the scheduler account; a CI-only
-first apply cannot rely on a grant to a not-yet-existing account. Keep the
-schedule paused during this handover. Repeat resource-scoped grants separately
-in each environment; do not use service-account keys.
+All roles below are on the corresponding **environment project**, not ops.
+This deliberate deployment-identity exception avoids basic Owner/Editor/Viewer
+roles but is not equivalent to a minimal custom role.
+
+| Plan role | Required refresh surface |
+| --- | --- |
+| `roles/iam.securityReviewer` | Project, bucket, dataset, SA and Cloud Run IAM policies, including resource-level IAM reads. |
+| `roles/compute.viewer` | VPC, subnet, firewalls, image and optional VM/disk reads. |
+| `roles/storage.bucketViewer` | Bucket settings, without raw-object content access. |
+| `roles/bigquery.metadataViewer` | Dataset/table definitions without table-data reads or query submission. |
+| `roles/run.viewer` | Cloud Run job definitions. |
+| `roles/cloudscheduler.viewer` | Scheduler job definitions. |
+| `roles/secretmanager.viewer` | Secret container metadata, not version payloads. |
+| `roles/artifactregistry.reader` | Repository configuration; also permits artifact reads. |
+
+| Apply role | Managed surface / trade-off |
+| --- | --- |
+| `roles/storage.admin` | Raw bucket settings, lifecycle and bucket IAM; also raw object data. |
+| `roles/bigquery.admin` | Dataset/table creation and dataset IAM; also broad data/query access. |
+| `roles/compute.networkAdmin` | VPC and subnet lifecycle. |
+| `roles/compute.securityAdmin` | Firewall lifecycle. |
+| `roles/compute.instanceAdmin.v1` | Optional VM and boot disk lifecycle; broader compute capabilities. |
+| `roles/iam.serviceAccountAdmin` | Runtime/scheduler service accounts and their policies; does not supply `actAs`. |
+| `roles/iam.serviceAccountUser` | Project-level `actAs` for attaching newly created runtime/scheduler SAs without a first-apply dependency on existing accounts; also permits attaching other environment SAs. |
+| `roles/resourcemanager.projectIamAdmin` | Runtime BigQuery Job User grant; permits powerful project-IAM changes/self-escalation. |
+| `roles/run.admin` | Job and job-invoker IAM lifecycle. |
+| `roles/cloudscheduler.admin` | Schedule lifecycle. |
+| `roles/secretmanager.admin` | Container and secret-IAM lifecycle; predefined role also permits secret payload access/deletion even though Terraform manages no values. |
+| `roles/artifactregistry.admin` | Repository, immutable-tag setting and cleanup policy lifecycle. |
+
+These are trusted deployment administrators, not strong isolation boundaries.
+Resource-scoped `actAs` and a custom secret-management role could narrow access,
+but require additional bootstrap choreography/custom-role maintenance. No
+IAP-admin role is needed: human grants are bootstrap-owned, not infra resources.
+Runtime and scheduler roles remain resource-scoped wherever possible.
+
+Both CI SAs additionally receive bucket-scoped `roles/storage.objectUser` on
+the ops state bucket for reads and state/lock writes/deletes. This is **not
+read-only planning**: bucket-wide access covers every prefix, including bootstrap
+and future PROD state. Backend prefixes do not enforce IAM isolation. A malicious
+MR can execute Terraform/provider code with the plan identity and can corrupt or
+exfiltrate shared state. Separate state buckets/identities or a trusted-plan gate
+are required before treating environments as isolated.
+
+Trust repository members and runners, review CI/Terraform changes, and protect
+`main`/release tags from untrusted pushes. Provider cache contains binaries only;
+lockfiles/checksums must be reviewed. Plans may embed state values, so artifacts
+are restricted to Maintainers and expire after one day. Neither JWTs nor credential
+configs, gcloud caches or secret payloads belong in artifacts or caches. CI config
+is locally checked; live exchange, refresh-role sufficiency, GitLab artifact
+permissions and the unprotected-ref denial remain manual verification.
 
 No basic roles are granted. `objectCreator` plus `objectViewer` is intentionally
 not used because it cannot overwrite an existing object. Object User is broader
 than create/read, including delete/update; it is restricted to the raw bucket.
 The runtime cannot administer the bucket or deploy Terraform with these grants.
-Token Creator allows assuming all runtime permissions: grant it only to trusted
-developers. This conditional resource is not an organization-wide impersonation
-deny policy; it cannot prevent impersonation granted elsewhere.
+Bootstrap's project-level human Token Creator allows assuming **any** SA in
+DEV/TEST: grant it only to trusted humans. It does not grant access to ops CI SAs
+and is not an organization-wide impersonation deny.
 
 Dataset IAM members must not be mixed with dataset `access` blocks or
 `google_bigquery_dataset_access` resources. They also remove authorized-view
@@ -123,33 +218,29 @@ permissions; no authorized views are currently configured.
 
 Start at the repository root, using the existing Terraform deployment identity
 and impersonated ADC described in [the infra guide](../infra/README.md).
-It additionally needs service-account creation and IAM get/set permissions on
-the target project, raw bucket, dataset and runtime service account. An
-authorized administrator must grant those separately if absent. This step does
-not create the deployer or grant it additional permissions.
+Bootstrap provisions the CI identities/roles separately. Human grants must be
+applied there first, before removing the old infra grants; see
+[migration and GitLab setup](runbook.md#gitlab-wif-bootstrap-and-mr-plans).
 
 ```powershell
-$developer = Read-Host 'Your IAM principal, e.g. user:you@example.com'
 terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -out=dev.tfplan
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
 For a fresh deployment, repository-only configuration creates 17 resources
-(18 with the runtime developer grant). Enabling scheduled ingestion adds four
-more. The optional demo adds one VM; with a non-PROD developer it adds two
-instance-scoped IAM members as well.
+with no human grants. Enabling scheduled ingestion adds four more. The optional
+demo adds one VM and no human IAM.
 For an existing deployment, review the incremental plan rather than assuming a
 fixed addition count. Follow the [image-first sequence](runbook.md#scheduled-cloud-run-ingestion)
 before enabling the job. Review any unrelated changes before applying.
 
 ```powershell
 terraform -chdir=infra apply dev.tfplan
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' "-var=developer_principal=$developer" -detailed-exitcode
+terraform -chdir=infra plan '-var-file=env/dev.tfvars' -detailed-exitcode
 ```
 
-Expected second plan: no changes, exit code 0. Supply the same principal on
-future plans or explicitly set it in local configuration: reverting to the
-default null removes that grant. Do not commit personal identity values.
+Expected second plan: no changes, exit code 0. Keep the human principal in local
+bootstrap configuration only; infra no longer accepts that variable.
 
 ## Positive permission checks (PowerShell 7 on Windows)
 

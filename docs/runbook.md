@@ -4,6 +4,159 @@ Operational procedures. Commands are for **PowerShell 7 on Windows**, run from
 the repository root. Examples target DEV (`dep-2610-dev`); change `$project`
 for other environments.
 
+## GitLab WIF bootstrap and MR plans
+
+This section is deployment guidance, not a record of live federation.
+Configuration is DEV-first, with lint/test/plan/apply stages but **no apply
+jobs**. TEST/PROD environment files/jobs are not supplied.
+Read the [role catalogue and shared-state warning](security.md#gitlab-wif-and-ci-role-catalogue)
+before authorizing MR code. No keys, secret CI variables or AWS credentials are
+needed.
+
+### Apply bootstrap locally and migrate human grants
+
+1. Use an authorized administrator's **user ADC** for bootstrap, not the runtime
+   or a CI account. Keep the existing bootstrap GCS backend; the initial
+   local-to-GCS migration is not repeated.
+2. Set the exact GitLab source project path and optional human principal in your
+   local bootstrap inputs. Human grants are project-wide Token Creator and IAP
+   on DEV **and TEST**, even while only DEV CI accounts exist. PROD receives
+   neither. Keep these same bootstrap inputs on future plans.
+3. Apply/recheck bootstrap **before** removing the old infra resource-scoped
+   human grants. These independent states cannot use a Terraform `moved` block.
+   Retain the existing manual/Owner OS Login authorization or have an
+   administrator provision it separately; the old instance OS Login grant will
+   be removed, not recreated in bootstrap.
+
+**PowerShell on Windows**, repository root:
+
+```powershell
+gcloud auth application-default login
+gcloud auth application-default set-quota-project dep-2610-ops
+$billing = Read-Host 'Existing billing account ID'
+$path = Read-Host 'Exact GitLab namespace/project path'
+$developer = Read-Host 'Human user:/group: email principal'
+if (-not $billing -or -not $path -or -not $developer) { throw 'Bootstrap inputs must not be empty' }
+$inputs = @("-var=billing_account_id=$billing", "-var=gitlab_project_path=$path", "-var=developer_principal=$developer")
+terraform -chdir=bootstrap init -input=false
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap backend initialization failed' }
+terraform -chdir=bootstrap plan @inputs -out=wif.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap plan failed' }
+# Review WIF, DEV CI roles, state-bucket grants and exactly four DEV/TEST human grants.
+terraform -chdir=bootstrap apply wif.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap apply failed' }
+terraform -chdir=bootstrap plan @inputs -detailed-exitcode
+if ($LASTEXITCODE -ne 0) { throw 'Bootstrap is not yet converged' }
+terraform -chdir=bootstrap output project_numbers
+terraform -chdir=bootstrap output -raw gitlab_wif_provider
+terraform -chdir=bootstrap output -raw gitlab_wif_audience
+terraform -chdir=bootstrap output ci_plan_service_accounts
+terraform -chdir=bootstrap output ci_apply_service_accounts
+```
+
+To omit human grants, omit `developer_principal` instead of using this example's
+required `$developer` input. Do not commit personal emails unless intentional.
+The plan/apply role grants target only DEV by default; the four human grants
+target DEV/TEST projects. Review every incremental change rather than expecting
+a fixed total resource count.
+
+Then restore the existing, separate infra deployment ADC (not runtime ADC).
+Remove any old `developer_principal` setting from local **infra** tfvars,
+`TF_VAR_developer_principal`, saved command lines or wrappers, not bootstrap.
+Review a normal DEV infra plan and apply it manually as the existing deployer:
+
+```powershell
+$sa = Read-Host 'Existing Terraform deployment service account email'
+if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
+gcloud auth application-default login --impersonate-service-account=$sa
+terraform -chdir=infra init -reconfigure -backend-config=env/dev.gcs.tfbackend
+if ($LASTEXITCODE -ne 0) { throw 'Infra backend initialization failed' }
+terraform -chdir=infra plan -var-file=env/dev.tfvars -out=human-migration.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Infra migration plan failed' }
+# Expected human removals if present: old runtime Token Creator, demo IAP and demo OS Login.
+# VM/network changes are not required for this IAM migration.
+terraform -chdir=infra apply human-migration.tfplan
+if ($LASTEXITCODE -ne 0) { throw 'Infra human-grant migration failed' }
+```
+
+Do not remove state entries manually or disable the VM as an IAM-migration
+shortcut. New project grants remain when a demo VM is torn down. Owner/inherited
+access can conceal missing explicit grants; it is not proof of least privilege.
+
+### GitLab settings
+
+1. Under **Settings > CI/CD > Variables**, set `GCP_OPS_PROJECT_NUMBER` to the
+   numeric `ops` entry in bootstrap's `project_numbers` output. It is non-secret,
+   unmasked, and must be available to unprotected MR jobs (not protected-only).
+   `GCP_OPS_PROJECT_ID` defaults to `dep-2610-ops` in CI; override it if different.
+   No JSON key, ADC file, access token or Telegram credential is a CI variable.
+2. Under repository branch rules, protect `main`, disallow direct unreviewed
+   pushes and require trusted review. Review protected tags too: apply trust
+   accepts **any protected ref** of this project, not just main.
+3. Use trusted Linux amd64 Docker runners with outbound HTTPS access to GitLab,
+   Google APIs, HashiCorp releases/registry and the pinned container registries.
+   The SDK job installs CA certificates, curl and unzip from Debian mirrors,
+   then checks the pinned Terraform archive against the official SHA256 sums.
+   Check support for `id_tokens` and `artifacts:access: maintainer` in your GitLab
+   version. No Docker-in-Docker or privileged runner is required.
+4. Restrict project membership and artifact visibility. Plans can contain state
+   values; only Maintainers can download the one-day plan artifact. Review
+   changes to CI, Terraform and lockfiles before running them. Same-project
+   unprotected MR code still gets state **write/delete access across the shared
+   bucket**. Never run untrusted fork code with parent-project credentials.
+5. Keep the weekly schedule paused during any deployment handover. This pipeline
+   neither publishes an image nor applies infrastructure. A future apply step
+   must plan for the saved artifact's Terraform version and commit.
+
+### Exact auth flow (Bash in the CI SDK image)
+
+The job requests a GitLab `id_tokens.GITLAB_OIDC_TOKEN` with audience
+`https://iam.googleapis.com/projects/${GCP_OPS_PROJECT_NUMBER}/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com`.
+The executable core below matches [.gitlab-ci.yml](../.gitlab-ci.yml); directory
+permissions, input validation, checksum-verified Terraform installation and
+credential cleanup are also in that file:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="$CI_PROJECT_DIR/.ci-auth/wif.json"
+umask 077
+printf '%s' "$GITLAB_OIDC_TOKEN" > "$CI_PROJECT_DIR/.ci-auth/token"
+unset GITLAB_OIDC_TOKEN
+WIF_PROVIDER="projects/$GCP_OPS_PROJECT_NUMBER/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com"
+gcloud iam workload-identity-pools create-cred-config "$WIF_PROVIDER" \
+  --service-account="ci-${CI_SA_KIND}-${CI_ENV}@${GCP_OPS_PROJECT_ID}.iam.gserviceaccount.com" \
+  --credential-source-file="$CI_PROJECT_DIR/.ci-auth/token" \
+  --output-file="$GOOGLE_APPLICATION_CREDENTIALS"
+```
+
+This creates an external-account credential **configuration**, not a private
+key. Terraform refreshes it using the job token. Creating the config alone does
+not prove exchange/impersonation; `terraform init/plan` must actually work.
+Credential files are not cached or published; `after_script` removes them.
+
+### Verify positive and negative behavior
+
+Open a same-project MR from an unprotected branch. Expected automatic jobs:
+`fmt`, `validate`, `tflint`, `terraform-test`, then `plan:dev`. The Terraform tests
+are provider-mocked and make no GCP calls. The cloud plan refreshes DEV state
+with `ci-plan-dev`; review and download its restricted plan artifact. There
+must be **no apply job**. Fork MRs run static checks, not cloud plans.
+No live pipeline success is claimed until you run this.
+
+Run the optional manual `verify:unprotected-apply-denied` job in that MR.
+It first authenticates `ci-plan-dev` and forces an access-token refresh (printed
+nowhere), so a broken provider/audience cannot masquerade as the negative result.
+It then tries `ci-apply-dev` with the same unprotected token. Expected: an IAM
+`iam.serviceAccounts.getAccessToken` denial and a green assertion job printing
+`PASS: unprotected-ref token cannot impersonate ci-apply-dev`. Unexpected success
+or another failure reason makes the assertion fail; inspect its status because
+the optional manual job is non-blocking. JWTs, access tokens and raw auth logs
+are never printed or artifacts. This checks the trust policy, not an apply.
+
+Offline negative cases are also in
+[bootstrap mock tests](../bootstrap/tests/wif.tftest.hcl): invalid project URL,
+unknown/empty CI environments, public human member and workload-as-human
+principal must all be rejected. Mock tests cannot prove live IAM denial.
+
 ## Private network and IAP demo
 
 All commands in this section are **PowerShell on Windows**, repository root.
@@ -111,21 +264,20 @@ into this step.
 
 This DEV VM is **billable in Europe**, not free tier. Reserve enough time for
 both the test and teardown. Set `enable_iap_demo_vm = true` temporarily in DEV
-tfvars; set `developer_principal` explicitly in your local configuration (for
-example `user:you@example.com`, never a secret). Preserve that value across
-plans: it also controls the existing non-PROD runtime impersonation grant.
-Do not commit a personal identity without intending to publish it.
+tfvars. First provision `developer_principal` in the locally applied bootstrap
+(for example `user:you@example.com`); it grants project-level Token Creator and
+IAP in DEV/TEST, not PROD, independently of this VM flag. Do not pass this input
+to infra or commit a personal identity without intending to publish it.
 
-Review/apply another plan as the deployer. Expect one VM and two instance IAM
-members; if the developer was previously null, the separate runtime
-impersonation member is also added. The VM is `dev-iap-demo`, `e2-micro`,
-`europe-southwest1-a`, Debian 12, 10 GiB disk. Both demo grants are omitted in
-PROD even with a principal set.
+Review/apply another plan as the deployer. Expect one VM and no human IAM
+additions. The VM is `dev-iap-demo`, `e2-micro`, `europe-southwest1-a`,
+Debian 12, 10 GiB disk.
 
 For SSH, use **the developer's gcloud user login**, not deployer impersonation.
-The developer needs the generated instance IAP/OS Login grants, plus existing
-Compute discovery permissions (`compute.projects.get` and instance lookup).
-No broad project role is added here. Non-organization users normally do not
+The developer needs bootstrap IAP access plus existing OS Login authorization
+and Compute discovery permissions (`compute.projects.get` and instance lookup).
+This repository no longer creates an explicit OS Login grant; an administrator
+must verify/provision that separately for a non-Owner operator. Non-organization users normally do not
 need OS Login External User; organization-owned projects may require that
 separate organization-level prerequisite. SSH keys are login keys, never
 service-account keys; gcloud may generate/use a local SSH key.
@@ -461,7 +613,7 @@ Safety rules for every block below:
 - Your gcloud account, or an authorised provisioning service account, has
   `secretmanager.versions.add` on the secret. The runtime SA intentionally lacks it.
 - For the test step: your account has the non-PROD Token Creator grant on the
-  runtime SA (`developer_principal`). The deployer ADC can run `terraform state pull`.
+  DEV/TEST project (bootstrap `developer_principal`). The deployer ADC can run `terraform state pull`.
 - You have sent at least one message to the bot from the target chat, so `getUpdates` can show its chat ID.
 
 ### Add a secret version

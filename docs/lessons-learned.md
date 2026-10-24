@@ -139,6 +139,21 @@ data provider's documentation and shaped the design.
   `effective_labels` or a check of the real resource.
 - **Docs:** https://googlecloudplatform.github.io/magic-modules/best-practices/labels-and-annotations/
 
+### BigQuery appends Hive partition keys to a pinned schema
+- **What happened:** after replacing autodetect on `ext_ookla_raw` with the schema from
+  `schemas/ookla_raw.json`, the plan showed `schema` "forces replacement". The stored table schema
+  contained `type`, `year` and `quarter`: BigQuery adds the Hive partition keys from the URI prefix
+  after creation, and the file correctly does not list them.
+- **Why it matters:** the diff never converges. Every plan, including the one right after apply,
+  would drop and recreate the table.
+- **Fix:** `ignore_auto_generated_schema = true` on the table (present in provider 8.7.0, checked with
+  `terraform providers schema -json`), asserted in `infra/tests/bigquery.tftest.hcl`.
+  The INTEGER → FLOAT latency change is real and still replaces the table once.
+- **Status:** a clean second plan after the live apply is still to be confirmed.
+- **Takeaway:** a pinned schema on a Hive-partitioned table describes the files, not the table;
+  server-added columns need an explicit ignore.
+- **Docs:** https://registry.terraform.io/providers/hashicorp/google/latest/docs/resources/bigquery_table
+
 ## IAM
 
 ### IAM changes are eventually consistent
@@ -174,8 +189,24 @@ data provider's documentation and shaped the design.
 - Mutation check: temporarily changing `objectUser` to `objectCreator` made the test fail, which proves
   the assertion works.
 - Limitation: a test asserts on named resources only and cannot enumerate every IAM resource in a plan;
-  a plan-JSON scan in CI is planned.
+  the plan-JSON scan in CI (`scripts/check_plan.py`, next section) covers that gap.
 - **Docs:** https://developer.hashicorp.com/terraform/language/tests
+
+## Plan policy in CI
+
+### The policy check caught perpetual drift that looked like a normal plan
+- **What happened:** after the schema fix, the MR plan listed one replacement next to ordinary changes.
+  In a plan review it read as the expected one-off consequence of the fix. `policy:dev` failed on
+  rule P10 (delete or replacement of a stateful resource), and reading that diff showed the cause
+  was the Hive partition columns, so the replacement would have repeated on every plan
+  (previous section).
+- **Fix:** `ignore_auto_generated_schema = true`. `ALLOW_DESTROY` was not used to unblock the
+  pipeline: it disables P10 for every resource, not only this table.
+- **Takeaway:** a replace or delete in a plan needs a reason, not just approval. A rule that blocks
+  it by default makes someone read the attribute that forces it.
+- **Related trap:** P10 later passed on a plan built against an empty state, where all 21 changes were
+  creates. A green policy run proves only that the plan is safe *as computed*; also check
+  `terraform state list` and the backend the plan was made with.
 
 ## Repository and mirroring
 

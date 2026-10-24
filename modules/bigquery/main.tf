@@ -42,12 +42,15 @@ resource "google_bigquery_table" "native" {
 }
 
 resource "google_bigquery_table" "ext_ookla_raw" {
-  project             = var.project_id
-  dataset_id          = google_bigquery_dataset.network_perf.dataset_id
-  table_id            = "ext_ookla_raw"
-  schema              = file("${path.module}/../../schemas/ookla_raw.json")
-  deletion_protection = var.deletion_protection
-  labels              = local.labels
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.network_perf.dataset_id
+  table_id   = "ext_ookla_raw"
+  schema     = file("${path.module}/../../schemas/ookla_raw.json")
+  # BigQuery appends the Hive partition keys (type, year, quarter) to the stored
+  # schema; without this every plan sees them as dropped columns and forces replacement.
+  ignore_auto_generated_schema = true
+  deletion_protection          = var.deletion_protection
+  labels                       = local.labels
 
   external_data_configuration {
     autodetect    = false

@@ -45,5 +45,7 @@ uses PARQUET over `gs://<raw>/ookla/*`, with CUSTOM Hive partition types declare
 The Hive options require a partition filter. Labels and the existing
 `deletion_protection` variable apply to this table as well.
 This avoids autodetect drift when source quarters mix physical Parquet types
-for nullable latency columns. Terraform manages the external table; the
-application does not create it.
+for nullable latency columns. BigQuery appends the Hive keys `type`, `year` and
+`quarter` to the stored schema; `ignore_auto_generated_schema = true` keeps
+those server-added columns from forcing a replacement on every plan.
+Terraform manages the external table; the application does not create it.

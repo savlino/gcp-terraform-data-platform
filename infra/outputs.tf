@@ -28,6 +28,16 @@ output "raw_bucket_name" {
   value       = module.storage.raw_bucket_name
 }
 
+output "raw_bucket_force_destroy" {
+  description = "Whether force_destroy is enabled for the raw bucket."
+  value       = module.storage.raw_bucket_force_destroy
+}
+
+output "raw_bucket_lifecycle_rule_count" {
+  description = "Number of raw bucket lifecycle rules."
+  value       = module.storage.raw_bucket_lifecycle_rule_count
+}
+
 output "dataset_id" {
   description = "BigQuery dataset ID."
   value       = module.bigquery.dataset_id
@@ -36,6 +46,21 @@ output "dataset_id" {
 output "table_ids" {
   description = "Native BigQuery table IDs keyed by purpose."
   value       = module.bigquery.table_ids
+}
+
+output "native_tables_deletion_protected" {
+  description = "True when all native BigQuery tables are deletion-protected."
+  value       = module.bigquery.native_tables_deletion_protected
+}
+
+output "external_table_deletion_protected" {
+  description = "Deletion protection state of ext_ookla_raw."
+  value       = module.bigquery.external_table_deletion_protected
+}
+
+output "dataset_delete_contents_on_destroy" {
+  description = "Dataset delete_contents_on_destroy flag."
+  value       = module.bigquery.dataset_delete_contents_on_destroy
 }
 
 output "runtime_service_account_email" {
@@ -54,12 +79,12 @@ output "alert_secret_name" {
 }
 
 output "ingest_repository_id" {
-  description = "Application Artifact Registry repository ID."
-  value       = module.ingest_job.repository_id
+  description = "Existing shared Artifact Registry repository ID (managed by bootstrap)."
+  value       = split("/", var.image_repository)[2]
 }
 
 output "ingest_image_uri" {
-  description = "Image URI using the environment's configured image_tag."
+  description = "Shared image URI using image_digest when set, otherwise image_tag."
   value       = module.ingest_job.image_uri
 }
 
@@ -76,4 +101,14 @@ output "scheduler_job_name" {
 output "scheduler_service_account_email" {
   description = "Scheduler OAuth identity; null until enabled."
   value       = module.ingest_job.scheduler_sa_email
+}
+
+output "scheduler_paused" {
+  description = "Whether the schedule is paused; null until enabled."
+  value       = module.ingest_job.scheduler_paused
+}
+
+output "ingest_job_deletion_protection" {
+  description = "Whether the Cloud Run job has deletion protection; null until enabled."
+  value       = module.ingest_job.job_deletion_protection
 }

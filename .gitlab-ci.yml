@@ -116,62 +116,138 @@ python:lint-test:
     - rm -f "$CI_PROJECT_DIR/.ci-auth/token" "$CI_PROJECT_DIR/.ci-auth/wif.json" "$CI_PROJECT_DIR/.ci-auth/plan.json" "$CI_PROJECT_DIR/.ci-auth/auth.log"
     - rm -rf "$CI_PROJECT_DIR/.ci-auth/gcloud"
 
-plan:dev:
+.plan:
   extends: .wif
   stage: plan
-  resource_group: terraform-dev
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - terraform -chdir=infra init -lockfile=readonly -backend-config=env/dev.gcs.tfbackend
-    - terraform -chdir=infra plan -lock-timeout=120s -var-file=env/dev.tfvars -out=dev.tfplan
-    - terraform -chdir=infra show -json dev.tfplan > infra/dev.plan.json
+    - terraform -chdir=infra init -lockfile=readonly -backend-config=env/${CI_ENV}.gcs.tfbackend
+    - terraform -chdir=infra plan -lock-timeout=120s -var-file=env/${CI_ENV}.tfvars -out=${CI_ENV}.tfplan
+    - terraform -chdir=infra show -json ${CI_ENV}.tfplan > infra/${CI_ENV}.plan.json
+    # Records which commit produced the plan; apply refuses a plan from another commit.
+    - printf '%s\n' "$CI_COMMIT_SHA" > infra/${CI_ENV}.plan.sha
   artifacts:
     access: maintainer
     expire_in: 1 day
-    paths: [infra/dev.tfplan, infra/dev.plan.json]
+    paths: [infra/*.tfplan, infra/*.plan.json, infra/*.plan.sha]
 
-policy:dev:
+.policy:
   stage: policy
   image: python:3.12-slim
-  needs:
-    - job: plan:dev
-      artifacts: true          # takes infra/dev.plan.json from plan:dev
   interruptible: true          # a newer push to the MR cancels this run
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - 'test -f infra/dev.plan.json || { echo "dev.plan.json is missing: plan:dev did not produce it"; exit 1; }'
-    - python scripts/check_plan.py infra/dev.plan.json --env dev --junit policy-dev.xml
+    - 'test -f infra/${CI_ENV}.plan.json || { echo "${CI_ENV}.plan.json is missing: plan:${CI_ENV} did not produce it"; exit 1; }'
+    - python scripts/check_plan.py infra/${CI_ENV}.plan.json --env ${CI_ENV} --junit policy-${CI_ENV}.xml
   artifacts:
     when: always
     access: maintainer
     expire_in: 1 day
     reports:
-      junit: policy-dev.xml
+      junit: policy-*.xml
 
-apply:dev:
+.apply:
   extends: .wif                # terraform binary + WIF credentials
   stage: apply
   variables:
-    CI_SA_KIND: "apply"        # ci-apply-dev; WIF allows it only on protected refs
-  needs:
-    - job: plan:dev
-      artifacts: true          # infra/dev.tfplan
-    - job: policy:dev
-      artifacts: false
+    CI_SA_KIND: "apply"        # ci-apply-<env>; WIF allows it only on protected refs
   rules:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
       when: manual
   interruptible: false         # a newer push must never cancel a running apply
-  resource_group: terraform-dev  # same group as plan:dev: one terraform run against dev state at a time
+  script:
+    - |
+      set -eu
+      # Plan-before-apply guard: the plan must exist and come from this commit.
+      test -f "infra/${CI_ENV}.tfplan" || { echo "ERROR: infra/${CI_ENV}.tfplan is missing; run plan:${CI_ENV} in this pipeline"; exit 1; }
+      test -f "infra/${CI_ENV}.plan.sha" || { echo "ERROR: plan commit marker is missing"; exit 1; }
+      if [ "$(cat "infra/${CI_ENV}.plan.sha")" != "$CI_COMMIT_SHA" ]; then
+        echo "ERROR: plan was created for another commit; re-run the pipeline"
+        exit 1
+      fi
+    - terraform -chdir=infra init -lockfile=readonly -backend-config=env/${CI_ENV}.gcs.tfbackend
+    # Terraform itself rejects a saved plan when the state changed after planning.
+    - terraform -chdir=infra apply -lock-timeout=120s ${CI_ENV}.tfplan
+
+plan:dev:
+  extends: .plan
+  resource_group: terraform-dev
+  variables: {CI_ENV: "dev", CI_SA_KIND: "plan"}
+
+plan:test:
+  extends: .plan
+  resource_group: terraform-test
+  variables: {CI_ENV: "test", CI_SA_KIND: "plan"}
+
+plan:prod:
+  extends: .plan
+  resource_group: terraform-prod
+  variables: {CI_ENV: "prod", CI_SA_KIND: "plan"}
+
+policy:dev:
+  extends: .policy
+  variables: {CI_ENV: "dev"}
+  needs:
+    - job: plan:dev
+      artifacts: true
+
+policy:test:
+  extends: .policy
+  variables: {CI_ENV: "test"}
+  needs:
+    - job: plan:test
+      artifacts: true
+
+policy:prod:
+  extends: .policy
+  variables: {CI_ENV: "prod"}
+  needs:
+    - job: plan:prod
+      artifacts: true
+
+apply:dev:
+  extends: .apply
+  variables: {CI_ENV: "dev", CI_SA_KIND: "apply"}
+  resource_group: terraform-dev  # shared with plan:dev: one Terraform run per state at a time
   environment:
     name: dev
-  script:
-    - terraform -chdir=infra init -lockfile=readonly -backend-config=env/dev.gcs.tfbackend
-    - terraform -chdir=infra apply -lock-timeout=120s dev.tfplan
+  needs:
+    - job: plan:dev
+      artifacts: true
+    - job: policy:dev
+      artifacts: false
+
+apply:test:
+  extends: .apply
+  variables: {CI_ENV: "test", CI_SA_KIND: "apply"}
+  resource_group: terraform-test
+  environment:
+    name: test
+  needs:
+    - job: apply:dev           # promotion order: dev must succeed first
+      artifacts: false
+    - job: plan:test
+      artifacts: true
+    - job: policy:test
+      artifacts: false
+
+apply:prod:
+  extends: .apply
+  variables: {CI_ENV: "prod", CI_SA_KIND: "apply"}
+  resource_group: terraform-prod
+  environment:
+    name: prod
+  needs:
+    - job: apply:test
+      artifacts: false
+    - job: plan:prod
+      artifacts: true
+    - job: policy:prod
+      artifacts: false
 
 verify:unprotected-apply-denied:
   extends: .wif

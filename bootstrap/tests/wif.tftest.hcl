@@ -1,3 +1,5 @@
+mock_provider "google-beta" {}
+
 mock_provider "google" {
   mock_data "google_project" {
     override_during = plan
@@ -93,14 +95,14 @@ run "dev_first_federation" {
 
   assert {
     condition = (
-      length(google_project_iam_member.ci_plan) == 8 &&
-      length(google_project_iam_member.ci_apply) == 12 &&
+      length(google_project_iam_member.ci_plan) == 7 &&
+      length(google_project_iam_member.ci_apply) == 11 &&
       toset([for grant in google_project_iam_member.ci_apply : grant.role]) == toset([
         "roles/storage.admin", "roles/bigquery.admin", "roles/compute.networkAdmin",
         "roles/compute.securityAdmin", "roles/compute.instanceAdmin.v1",
         "roles/iam.serviceAccountAdmin", "roles/iam.serviceAccountUser",
         "roles/resourcemanager.projectIamAdmin", "roles/run.admin",
-        "roles/cloudscheduler.admin", "roles/secretmanager.admin", "roles/artifactregistry.admin",
+        "roles/cloudscheduler.admin", "roles/secretmanager.admin",
       ]) &&
       alltrue([
         for grant in google_project_iam_member.ci_plan :
@@ -109,7 +111,7 @@ run "dev_first_federation" {
         contains([
           "roles/iam.securityReviewer", "roles/compute.viewer", "roles/storage.bucketViewer",
           "roles/bigquery.metadataViewer", "roles/run.viewer", "roles/cloudscheduler.viewer",
-          "roles/secretmanager.viewer", "roles/artifactregistry.reader",
+          "roles/secretmanager.viewer",
         ], grant.role)
       ]) &&
       alltrue([
@@ -204,4 +206,12 @@ run "reject_workload_as_human" {
     developer_principal = "serviceAccount:workload@example.iam.gserviceaccount.com"
   }
   expect_failures = [var.developer_principal]
+}
+
+run "reject_prod_human_environment" {
+  command = plan
+  variables {
+    human_access_environments = ["dev", "prod"]
+  }
+  expect_failures = [var.human_access_environments]
 }

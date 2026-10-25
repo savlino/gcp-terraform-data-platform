@@ -1,3 +1,20 @@
+variable "artifact_registry_region" {
+  type        = string
+  description = "Location of the shared ops Artifact Registry repository."
+  default     = "europe-southwest1"
+
+  validation {
+    condition     = can(regex("^[a-z]+-[a-z]+[0-9]+$", var.artifact_registry_region))
+    error_message = "artifact_registry_region must be a regional location such as europe-southwest1."
+  }
+}
+
+variable "artifact_cleanup_dry_run" {
+  type        = bool
+  description = "Keep true until the first cleanup run has been reviewed; then set to false in a separate commit"
+  default     = true
+}
+
 variable "gitlab_project_path" {
   type        = string
   description = "Exact case-sensitive GitLab.com namespace/project path authorized to federate."
@@ -27,6 +44,20 @@ variable "developer_principal" {
   validation {
     condition     = var.developer_principal == null ? true : can(regex("^(user|group):[^@\\s:]+@[^@\\s:]+\\.[^@\\s:]+$", var.developer_principal))
     error_message = "developer_principal must be null or a user:/group: email principal, not a workload identity."
+  }
+}
+
+variable "human_access_environments" {
+  type        = list(string)
+  description = "Non-prod environments where developer_principal receives project-level Token Creator and IAP tunnel access."
+  default     = ["dev", "test"]
+
+  validation {
+    condition = (
+      alltrue([for env in var.human_access_environments : contains(["dev", "test", "prod"], env)]) &&
+      !contains(var.human_access_environments, "prod")
+    )
+    error_message = "human_access_environments may contain only dev, test or prod, and must not include prod."
   }
 }
 

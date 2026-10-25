@@ -6,3 +6,9 @@ provider "google" {
   billing_project       = var.ops_project_id
   user_project_override = true
 }
+
+provider "google-beta" {
+  project               = var.ops_project_id
+  billing_project       = var.ops_project_id
+  user_project_override = true
+}

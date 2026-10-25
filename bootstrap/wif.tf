@@ -12,7 +12,6 @@ locals {
     "roles/run.viewer",
     "roles/cloudscheduler.viewer",
     "roles/secretmanager.viewer",
-    "roles/artifactregistry.reader",
   ])
   ci_apply_roles = toset([
     "roles/storage.admin",
@@ -26,7 +25,6 @@ locals {
     "roles/run.admin",
     "roles/cloudscheduler.admin",
     "roles/secretmanager.admin",
-    "roles/artifactregistry.admin",
   ])
   ci_plan_grants = {
     for pair in setproduct(var.ci_environments, local.ci_plan_roles) :
@@ -37,7 +35,7 @@ locals {
     "${pair[0]}/${pair[1]}" => { env = pair[0], role = pair[1] }
   }
   human_grants = var.developer_principal == null ? {} : {
-    for pair in setproduct(toset(["dev", "test"]), toset([
+    for pair in setproduct(var.human_access_environments, toset([
       "roles/iam.serviceAccountTokenCreator",
       "roles/iap.tunnelResourceAccessor",
     ])) : "${pair[0]}/${pair[1]}" => { env = pair[0], role = pair[1] }

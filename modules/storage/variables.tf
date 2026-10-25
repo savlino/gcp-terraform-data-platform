@@ -5,7 +5,7 @@ variable "project_id" {
 
 variable "env" {
   type        = string
-  description = "Environment label and retention policy selector."
+  description = "Environment label."
 
   validation {
     condition     = contains(["dev", "test", "prod"], var.env)
@@ -26,11 +26,11 @@ variable "force_destroy" {
 
 variable "raw_retention_days" {
   type        = number
-  description = "Delete raw objects after this many days in non-prod only."
-  default     = 30
+  description = "Optional object age for lifecycle deletion; null disables the rule."
+  default     = null
 
   validation {
-    condition     = var.raw_retention_days > 0 && floor(var.raw_retention_days) == var.raw_retention_days
-    error_message = "raw_retention_days must be a positive whole number."
+    condition     = var.raw_retention_days == null ? true : var.raw_retention_days >= 1 && floor(var.raw_retention_days) == var.raw_retention_days
+    error_message = "raw_retention_days must be null or an integer greater than or equal to 1."
   }
 }

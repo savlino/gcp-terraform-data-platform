@@ -29,7 +29,7 @@ locals {
     for project_key, project_id in local.projects :
     project_id => (
       project_key == "ops"
-      ? local.shared_apis
+      ? setunion(local.shared_apis, toset(["artifactregistry.googleapis.com"]))
       : setunion(local.shared_apis, local.environment_apis)
     )
   }

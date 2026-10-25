@@ -1,6 +1,6 @@
 variable "project_id" {
   type        = string
-  description = "Environment project containing the repository, job and scheduler."
+  description = "Environment project containing the job and scheduler, not the shared repository."
 }
 
 variable "env" {
@@ -15,7 +15,7 @@ variable "env" {
 
 variable "region" {
   type        = string
-  description = "Cloud Run and Artifact Registry location, matching the data region."
+  description = "Cloud Run location, matching the data region."
 }
 
 variable "scheduler_region" {
@@ -39,9 +39,30 @@ variable "image_tag" {
   }
 }
 
+variable "image_repository" {
+  type        = string
+  description = "Existing shared Artifact Registry image path from bootstrap, without tag or digest."
+
+  validation {
+    condition     = can(regex("^[a-z]+-[a-z]+[0-9]+-docker\\.pkg\\.dev/[a-z0-9-]+/[a-z0-9_-]+/[a-z0-9/_-]+$", var.image_repository))
+    error_message = "image_repository must be a regional Artifact Registry image path without tag or digest."
+  }
+}
+
+variable "image_digest" {
+  type        = string
+  description = "Optional sha256 digest shared across environments; takes precedence over image_tag."
+  default     = null
+
+  validation {
+    condition     = var.image_digest == null ? true : can(regex("^sha256:[a-f0-9]{64}$", var.image_digest))
+    error_message = "image_digest must be null or sha256: followed by 64 lowercase hexadecimal characters."
+  }
+}
+
 variable "enable_ingest_job" {
   type        = bool
-  description = "Create the job and schedule only after pushing the image; false creates only the repository."
+  description = "Create the job and schedule only after publishing the image to the bootstrap-owned repository."
   default     = false
 }
 

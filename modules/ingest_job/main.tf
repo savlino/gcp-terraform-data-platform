@@ -4,30 +4,7 @@ locals {
     env        = var.env
     managed_by = "terraform"
   }
-  image_uri = "${var.region}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.ingest.repository_id}/ingest:${var.image_tag}"
-}
-
-resource "google_artifact_registry_repository" "ingest" {
-  project       = var.project_id
-  location      = var.region
-  repository_id = "${var.env}-ingest"
-  description   = "Container images for ${var.env} Ookla ingestion."
-  format        = "DOCKER"
-  labels        = local.labels
-
-  docker_config {
-    immutable_tags = true
-  }
-
-  cleanup_policy_dry_run = false
-  cleanup_policies {
-    id     = "delete-untagged"
-    action = "DELETE"
-    condition {
-      tag_state  = "UNTAGGED"
-      older_than = "604800s"
-    }
-  }
+  image_uri = var.image_digest == null ? "${var.image_repository}:${var.image_tag}" : "${var.image_repository}@${var.image_digest}"
 }
 
 resource "google_cloud_run_v2_job" "ingest" {

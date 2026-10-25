@@ -14,13 +14,14 @@ variables {
   scheduler_region = "europe-west1"
   runtime_sa_email = "ingest-runtime@dep-2610-dev.iam.gserviceaccount.com"
   image_tag        = "test-v1"
+  image_repository = "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest"
   application_env = {
     PROJECT_ID   = "dep-2610-dev"
     ALERT_SECRET = "projects/dep-2610-dev/secrets/alert-telegram"
   }
 }
 
-run "repository_first" {
+run "disabled_creates_no_job_resources" {
   command = plan
   module {
     source = "../modules/ingest_job"
@@ -28,22 +29,9 @@ run "repository_first" {
 
   assert {
     condition = (
-      google_artifact_registry_repository.ingest.docker_config[0].immutable_tags &&
-      !google_artifact_registry_repository.ingest.cleanup_policy_dry_run &&
-      google_artifact_registry_repository.ingest.location == var.region &&
-      google_artifact_registry_repository.ingest.labels == tomap({ project = "gcp-tf-portfolio", env = "dev", managed_by = "terraform" }) &&
-      output.image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-dev/dev-ingest/ingest:test-v1"
+      output.image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest:test-v1"
     )
-    error_message = "The repository must be labelled, regional and immutable with an explicit image tag."
-  }
-
-  assert {
-    condition = (
-      length([for policy in google_artifact_registry_repository.ingest.cleanup_policies : policy
-        if policy.action == "DELETE" && try(policy.condition[0].tag_state == "UNTAGGED" && policy.condition[0].older_than == "604800s", false)
-      ]) == 1
-    )
-    error_message = "Keep one delete policy for untagged versions older than seven days."
+    error_message = "Use the existing ops repository, never derive a repository from the environment project."
   }
 
   assert {
@@ -54,7 +42,7 @@ run "repository_first" {
       length(google_cloud_run_v2_job_iam_member.scheduler_invoker) == 0 &&
       output.job_name == null
     )
-    error_message = "Repository-only provisioning must not create an unusable job or schedule."
+    error_message = "Disabled ingestion must not create an unusable job or schedule."
   }
 }
 
@@ -89,8 +77,8 @@ run "enabled_job_and_oauth_schedule" {
     condition = (
       tomap({ for item in google_cloud_run_v2_job.ingest[0].template[0].template[0].containers[0].env : item.name => item.value }) == var.application_env &&
       alltrue([for item in google_cloud_run_v2_job.ingest[0].template[0].template[0].containers[0].env : length(item.value_source) == 0]) &&
-      google_cloud_run_v2_job.ingest[0].labels == google_artifact_registry_repository.ingest.labels &&
-      google_cloud_run_v2_job.ingest[0].template[0].labels == google_artifact_registry_repository.ingest.labels
+      google_cloud_run_v2_job.ingest[0].labels == tomap({ project = "gcp-tf-portfolio", env = "dev", managed_by = "terraform" }) &&
+      google_cloud_run_v2_job.ingest[0].template[0].labels == google_cloud_run_v2_job.ingest[0].labels
     )
     error_message = "Pass non-secret env settings without Cloud Run secret injection and label the job/executions."
   }
@@ -154,6 +142,46 @@ run "reject_latest" {
     image_tag = "latest"
   }
   expect_failures = [var.image_tag]
+}
+
+run "digest_pinning_overrides_tag" {
+  command = plan
+  module {
+    source = "../modules/ingest_job"
+  }
+  variables {
+    enable_ingest_job = true
+    image_digest      = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  assert {
+    condition = (
+      output.image_uri == "${var.image_repository}@${var.image_digest}" &&
+      google_cloud_run_v2_job.ingest[0].template[0].template[0].containers[0].image == output.image_uri
+    )
+    error_message = "Pin the exact shared digest, not an environment-specific tag."
+  }
+}
+
+run "reject_invalid_digest" {
+  command = plan
+  module {
+    source = "../modules/ingest_job"
+  }
+  variables {
+    image_digest = "sha256:too-short"
+  }
+  expect_failures = [var.image_digest]
+}
+
+run "reject_tag_in_repository_path" {
+  command = plan
+  module {
+    source = "../modules/ingest_job"
+  }
+  variables {
+    image_repository = "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest:latest"
+  }
+  expect_failures = [var.image_repository]
 }
 
 run "reject_invalid_memory" {

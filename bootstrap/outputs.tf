@@ -1,3 +1,18 @@
+output "ingest_repository_id" {
+  description = "Shared ops Artifact Registry repository ID."
+  value       = google_artifact_registry_repository.ingest.repository_id
+}
+
+output "ingest_image_repository" {
+  description = "Shared image path without tag or digest; pass this to every environment."
+  value       = "${var.artifact_registry_region}-docker.pkg.dev/${var.ops_project_id}/${google_artifact_registry_repository.ingest.repository_id}/ingest"
+}
+
+output "cloud_run_service_agents" {
+  description = "Environment Cloud Run service agents with Reader on the shared repository."
+  value       = { for env, identity in google_project_service_identity.cloud_run : env => identity.email }
+}
+
 output "gitlab_wif_provider" {
   description = "Full provider name for gcloud create-cred-config (without https://)."
   value       = local.wif_provider

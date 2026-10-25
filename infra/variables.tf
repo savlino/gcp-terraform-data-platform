@@ -82,12 +82,12 @@ variable "min_quarter" {
 
 variable "raw_retention_days" {
   type        = number
-  description = "Age in days before raw objects are deleted in non-prod; ignored in prod."
-  default     = 30
+  description = "Optional raw-object lifecycle age in days; null disables bucket lifecycle deletion."
+  default     = null
 
   validation {
-    condition     = var.raw_retention_days > 0 && floor(var.raw_retention_days) == var.raw_retention_days
-    error_message = "raw_retention_days must be a positive whole number."
+    condition     = var.raw_retention_days == null ? true : var.raw_retention_days >= 1 && floor(var.raw_retention_days) == var.raw_retention_days
+    error_message = "raw_retention_days must be null or an integer greater than or equal to 1."
   }
 }
 
@@ -132,9 +132,21 @@ variable "image_tag" {
   description = "Unique immutable application image tag; set in environment tfvars. Validated by ingest_job."
 }
 
+variable "image_repository" {
+  type        = string
+  description = "Shared image path from bootstrap ingest_image_repository; identical in all environments."
+  default     = "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest"
+}
+
+variable "image_digest" {
+  type        = string
+  description = "Optional sha256 release digest, identical in all environments; overrides image_tag. Validated by ingest_job."
+  default     = null
+}
+
 variable "enable_ingest_job" {
   type        = bool
-  description = "Enable Cloud Run and Scheduler only after pushing the configured image; repository is always created."
+  description = "Enable Cloud Run and Scheduler only after publishing the image to the bootstrap-owned ops repository."
   default     = false
 }
 

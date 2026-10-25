@@ -13,6 +13,13 @@ of a **whole environment** plan, not a targeted plan. It uses Python 3.12 and th
 standard library only, accepts UTF-8 with or without a PowerShell BOM, and
 examines only `resource_changes` entries with `mode == "managed"`.
 
+**Scope boundary:** run this checker against `infra` plans, not `bootstrap`.
+Bootstrap has no environment BigQuery dataset (required by P0), and its ops
+labels do not match an environment's P9 label check. Its CI/deployer IAM needs
+separate review. The current plan SAs use predefined metadata roles, not the
+basic `roles/viewer` role; if that role were present, P4 would reject it too.
+Do not weaken the environment rules to make a bootstrap plan pass.
+
 | ID | Check | Applies to |
 | --- | --- | --- |
 | P0 | At least one managed resource change and one `google_bigquery_dataset`; otherwise "check would pass vacuously". | Whole plan, including no-op managed entries |
@@ -71,6 +78,8 @@ state and must not be committed. Local synthetic checks do not verify a live MR.
 | Bootstrap `developer_principal` | `roles/iam.serviceAccountTokenCreator` | DEV and TEST projects only | Optional human local impersonation; broad across all SAs in those projects, not ops CI accounts. Absent by default and never granted in PROD. |
 | `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
 | Same bootstrap human | `roles/iap.tunnelResourceAccessor` | DEV and TEST projects only, independent of VM flag | Deliberate tunnel authorization, even if inherited Owner access already exists. No explicit OS Login grant is managed by this repo. |
+| DEV/TEST/PROD Cloud Run service agents (`service-<project-number>@serverless-robot-prod.iam.gserviceaccount.com`) | `roles/artifactregistry.reader` | Shared ops `ops-ingest` repository only | Bootstrap generates all three service identities and authorizes cross-project image pulls; no registry role on runtime SAs. |
+| Enabled `ci-apply-<env>` identities | `roles/artifactregistry.reader` | Same shared ops repository only | Deployment-time image read checks, not publishing or repository administration. |
 
 ## Private network and IAP-only SSH
 
@@ -147,8 +156,8 @@ is the default. Each SA receives additive `roles/iam.workloadIdentityUser`:
 The apply selector relies on the provider's project-path condition. Keep this
 pool dedicated to this project: another provider in the same pool could widen
 trust. A protected ref is not necessarily `main`; review protected branch **and
-tag** rules. There are no CI apply jobs yet. These grants do not give the plan
-account permission to impersonate the apply account.
+tag** rules. These grants do not give the plan account permission to
+impersonate the apply account.
 
 All roles below are on the corresponding **environment project**, not ops.
 This deliberate deployment-identity exception avoids basic Owner/Editor/Viewer
@@ -163,7 +172,6 @@ roles but is not equivalent to a minimal custom role.
 | `roles/run.viewer` | Cloud Run job definitions. |
 | `roles/cloudscheduler.viewer` | Scheduler job definitions. |
 | `roles/secretmanager.viewer` | Secret container metadata, not version payloads. |
-| `roles/artifactregistry.reader` | Repository configuration; also permits artifact reads. |
 
 | Apply role | Managed surface / trade-off |
 | --- | --- |
@@ -178,13 +186,20 @@ roles but is not equivalent to a minimal custom role.
 | `roles/run.admin` | Job and job-invoker IAM lifecycle. |
 | `roles/cloudscheduler.admin` | Schedule lifecycle. |
 | `roles/secretmanager.admin` | Container and secret-IAM lifecycle; predefined role also permits secret payload access/deletion even though Terraform manages no values. |
-| `roles/artifactregistry.admin` | Repository, immutable-tag setting and cleanup policy lifecycle. |
 
 These are trusted deployment administrators, not strong isolation boundaries.
 Resource-scoped `actAs` and a custom secret-management role could narrow access,
 but require additional bootstrap choreography/custom-role maintenance. No
 IAP-admin role is needed: human grants are bootstrap-owned, not infra resources.
 Runtime and scheduler roles remain resource-scoped wherever possible.
+Artifact Registry administration is now exclusively bootstrap-owned in ops.
+CI plan accounts no longer refresh an environment repository and receive no
+registry role; CI apply accounts receive only repository-scoped Reader in ops.
+The former project-level environment grants `roles/artifactregistry.reader`
+(plan SA) and `roles/artifactregistry.admin` (apply SA) were removed.
+Publishing remains a separately authorized repository-scoped Writer operation;
+no publisher grants are added automatically. Shared release integrity depends
+on trusting those writers and the bootstrap administrator.
 
 Both CI SAs additionally receive bucket-scoped `roles/storage.objectUser` on
 the ops state bucket for reads and state/lock writes/deletes. This is **not
@@ -209,6 +224,9 @@ The runtime cannot administer the bucket or deploy Terraform with these grants.
 Bootstrap's project-level human Token Creator allows assuming **any** SA in
 DEV/TEST: grant it only to trusted humans. It does not grant access to ops CI SAs
 and is not an organization-wide impersonation deny.
+Human access is bootstrap-owned and controlled only by
+`human_access_environments` (default `["dev", "test"]`); `prod` is rejected by
+validation.
 
 Dataset IAM members must not be mixed with dataset `access` blocks or
 `google_bigquery_dataset_access` resources. They also remove authorized-view
@@ -227,7 +245,7 @@ terraform -chdir=infra init -reconfigure '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
-For a fresh deployment, repository-only configuration creates 17 resources
+For a fresh deployment, infra with ingestion/demo disabled creates 16 resources
 with no human grants. Enabling scheduled ingestion adds four more. The optional
 demo adds one VM and no human IAM.
 For an existing deployment, review the incremental plan rather than assuming a

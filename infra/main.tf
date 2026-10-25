@@ -57,6 +57,8 @@ module "ingest_job" {
   scheduler_region     = var.scheduler_region
   runtime_sa_email     = module.iam.service_account_email
   image_tag            = var.image_tag
+  image_repository     = var.image_repository
+  image_digest         = var.image_digest
   enable_ingest_job    = var.enable_ingest_job
   scheduler_paused     = var.scheduler_paused != null ? var.scheduler_paused : var.env != "dev"
   schedule             = var.ingest_schedule

@@ -12,7 +12,7 @@ resource "google_storage_bucket" "raw" {
   }
 
   dynamic "lifecycle_rule" {
-    for_each = var.env == "prod" ? [] : [var.raw_retention_days]
+    for_each = var.raw_retention_days == null ? [] : [var.raw_retention_days]
     content {
       action {
         type = "Delete"

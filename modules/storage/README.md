@@ -10,11 +10,12 @@ No IAM grants are created.
 | `env` | `dev`, `test` or `prod` | Required |
 | `location` | Same regional location as BigQuery | Required |
 | `force_destroy` | Allow deletion of a non-empty bucket | `false` |
-| `raw_retention_days` | Positive integer object age for non-prod deletion | `30` |
+| `raw_retention_days` | Optional positive integer object age for lifecycle deletion; `null` disables the rule | `null` |
 
 Output: `raw_bucket_name`.
 
-Non-prod has a lifecycle Delete rule; prod has no age-based deletion rule.
+The lifecycle Delete rule is controlled by `raw_retention_days`: set a positive
+value to enable it, or `null` to disable it.
 Soft delete is explicitly disabled because raw files are reproducible and retained
 soft-deleted objects incur storage costs. This also means deleted raw files cannot
 be restored from this bucket. No versioning or retention lock is configured.

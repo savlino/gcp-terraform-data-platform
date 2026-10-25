@@ -27,6 +27,11 @@ No measured log volume is claimed.
 
 ## Artifact Registry
 
+One bootstrap-owned ops repository serves all three environments; promoting a
+digest does not create three environment copies. During migration, retained
+legacy environment repositories still consume storage until explicitly cleaned
+up after rollout/rollback verification.
+
 Conservative storage estimate for Artifact Registry image retention:
 
 - Tagged image size: ~300-500 MiB per build (`ingest` image with Python + Arrow + Google SDKs).

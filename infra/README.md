@@ -6,9 +6,9 @@ and [Telegram secret](../modules/secrets/README.md), plus
 [scheduled ingestion](../modules/ingest_job/README.md) and
 [private networking](../modules/network/README.md).
 The bucket and dataset receive the same `region`. Only DEV environment files are
-supplied. Repository-only setup creates seventeen resources: one bucket, one dataset,
+supplied. With ingestion/demo disabled, this root creates sixteen resources: one bucket, one dataset,
 three native tables, one external table, one runtime service account, one secret,
-four IAM members, one Artifact Registry repository, a VPC, subnet and two
+four IAM members, a VPC, subnet and two
 firewall rules. Enabling ingestion adds
 four resources: Cloud Run Job, scheduler service account, job-scoped invoker member
 and Scheduler job.
@@ -34,8 +34,13 @@ not by this root or CI-managed child modules.
 - [DEV variables](env/dev.tfvars): project, region, bounding box, minimum quarter,
   retention, destroy flags and `image_tag`. `region_bbox`, `min_quarter` and typed
   `app_settings` are passed as non-secret app env vars along with module outputs.
-- `enable_ingest_job = false` initially creates the registry without a job.
-  Push the image before changing it to true. `image_tag` is required from tfvars;
+- `enable_ingest_job = false` creates no job or registry in this module.
+  Bootstrap owns `ops-ingest` in ops and grants all three Cloud Run service agents
+  repository-scoped Reader. Publish the image before enabling the job.
+  `image_repository` defaults to the shared ops path; use bootstrap's output if
+  its project/region differs. Optional `image_digest` overrides `image_tag` for
+  exact artifact promotion; set the same repository and digest in every env.
+  `image_tag` remains required from tfvars;
   tags are immutable, so choose a new unique tag for each changed image.
 - `scheduler_paused = null` defaults to active in DEV and paused in TEST/PROD;
   DEV tfvars explicitly selects active. It has no effect until the job is enabled.
@@ -51,7 +56,7 @@ not by this root or CI-managed child modules.
   do not provide that separation. Use the default workspace, not a workspace
   per environment; use a separate working directory for each environment.
 - Standard labels are applied to every supporting resource, including the
-  registry, Cloud Run job/executions, demo VM and boot disk. Scheduler,
+  Cloud Run job/executions, demo VM and boot disk. The shared registry has ops labels in bootstrap. Scheduler,
   service accounts, VPC, subnet and firewall resources do not support labels
   in this provider.
 - DEV allows bucket/dataset contents to be destroyed and disables Terraform
@@ -82,7 +87,7 @@ Do not run apply until you have reviewed the plan.
    object access on the ops state bucket and permissions to manage DEV buckets,
    datasets and tables, plus service-account creation and IAM get/set permissions
    for the runtime grants, plus secret creation and secret IAM management.
-   Scheduled ingestion also needs repository/job/schedule management, job IAM
+   Scheduled ingestion also needs shared-repository read and job/schedule management, job IAM
    get/set and `iam.serviceAccounts.actAs` on runtime/scheduler identities.
    Network deployment needs VPC/subnet/firewall management; the optional demo
    also needs instance/disk creation/deletion. Human grants are not infra resources.
@@ -141,15 +146,15 @@ terraform -chdir=infra workspace show
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
 ```
 
-Expected workspace: `default`. For a fresh DEV state with the default null
-developer principal and ingestion/demo disabled, expect **17 to add, 0 to
+Expected workspace: `default`. For a fresh DEV state with
+ingestion/demo disabled, expect **16 to add, 0 to
 change, 0 to destroy**, all in DEV except state storage in ops. Stop if the plan
 touches bootstrap, another environment, creates the disabled demo, or includes
 NAT, connectors or other unrequested services.
-If the previous infrastructure is already applied without drift, expect only the
-registry and four network additions if neither was previously applied and
-ingestion is disabled. Preserve any configured developer principal on subsequent plans;
-see [security instructions](../docs/security.md).
+An existing environment repository is retained and removed from state without
+destruction by [registry_migration.tf](registry_migration.tf). Copy/verify its
+image before changing the job URI; see the
+[shared-registry migration](../docs/runbook.md#shared-ops-registry-migration).
 Review it before applying:
 
 ```powershell

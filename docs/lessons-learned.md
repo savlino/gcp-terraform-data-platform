@@ -208,6 +208,49 @@ data provider's documentation and shaped the design.
   creates. A green policy run proves only that the plan is safe *as computed*; also check
   `terraform state list` and the backend the plan was made with.
 
+## Multi-environment rollout precautions
+
+These are code-review lessons and deployment checks, not evidence of a
+successful live rollout.
+
+### Preserve resource addresses when introducing `for_each`
+- Moving a singleton DEV account or grant to a keyed instance requires a
+  `moved` block from its old address to the new address, such as `ci_plan["dev"]`.
+  Otherwise Terraform can replace the service account, changing its internal
+  identity and leaving old grants referring to a deleted account.
+- In this change the DEV CI accounts and grants already used `for_each`;
+  adding TEST/PROD keys does not itself require a move. Check the actual old
+  state addresses, not just resource names, before applying.
+- **Docs:** https://developer.hashicorp.com/terraform/language/modules/develop/refactoring
+
+### Order API activation, service-agent creation and IAM
+- Google service agents can be created lazily: enabling an API alone is not
+  proof that its service agent already exists. Before granting IAM to the
+  Cloud Run agent, explicitly create it with `google_project_service_identity`
+  (using `google-beta` here), then reference its returned email in the grant.
+- Cross-project Cloud Run image pulls require the environment's service agent
+  to exist before granting repository Reader. The dependency chain is API
+  activation, then `google_project_service_identity`, then the IAM member.
+  Enabling an API and guessing an agent email without that dependency can race.
+
+### Cache providers, never initialized environment backends
+- CI caches only the plugin directory. Do not cache `infra/.terraform` between
+  environments: it contains backend metadata, so reusing it can select the
+  wrong state. Each local environment also needs its own `TF_DATA_DIR` and an
+  explicit backend configuration.
+
+### Do not auto-cancel a running apply
+- Keep plan and policy jobs interruptible, but set `interruptible: false` on
+  apply. A new push must not automatically interrupt infrastructure changes.
+  This does not prevent manual cancellation, runner loss or network failure;
+  inspect state and generate a fresh plan after an interrupted apply.
+
+### Keep environment plan policy separate from bootstrap review
+- `check_plan.py` checks whole `infra` plans. Bootstrap has ops labels, no
+  environment dataset and different IAM responsibilities; it needs separate
+  review rather than exceptions to P0/P4/P9. Current plan SAs do not use the
+  basic `roles/viewer` role. See [the scope boundary](security.md#plan-policy-checks).
+
 ## Repository and mirroring
 
 - GitLab is the source of truth (CI runs there); GitHub is a push mirror. Commits go only to GitLab,

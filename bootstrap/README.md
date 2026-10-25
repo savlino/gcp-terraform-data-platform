@@ -23,6 +23,10 @@ The user applying this configuration needs:
 - `roles/billing.costsManager` on the billing account to create the budget (or a broader billing role containing `billing.budgets.create`).
 - `roles/serviceusage.serviceUsageConsumer` on the ops project for the provider's quota/billing project override.
 - Permission to read project metadata and obtain project numbers for all four projects.
+- Artifact Registry administration in ops and permission to generate the Cloud
+  Run service identities in DEV/TEST/PROD. `google-beta` is constrained to
+  `~> 8.7.0` for the documented beta-only service-identity resource; the stable
+  provider constraint remains unchanged.
 - Ops workload identity pool/provider administration and service-account
   creation/IAM management; project-IAM administration on selected environment
   projects and DEV/TEST for optional human grants. Review the
@@ -47,7 +51,7 @@ Use the narrowest applicable scope and verify current role permissions in Google
 | `cloudscheduler.googleapis.com` | Dev, test, prod | Trigger the weekly ingestion job. |
 | `iap.googleapis.com` | Dev, test, prod | Enable optional IAP TCP access to the demo VM. |
 | `secretmanager.googleapis.com` | Dev, test, prod | Store the alert webhook secret. |
-| `artifactregistry.googleapis.com` | Dev, test, prod | Store the ingestion container image. |
+| `artifactregistry.googleapis.com` | Ops, dev, test, prod | Ops hosts shared images; environment API activation is retained for compatibility. |
 | `logging.googleapis.com` | Dev, test, prod | Provide access to application and managed-service logs. |
 
 ## Apply using local state first
@@ -132,12 +136,13 @@ terraform plan -var="billing_account_id=YOUR-BILLING-ACCOUNT-ID" -var="gitlab_pr
 Required input `gitlab_project_path` is the exact, case-sensitive path, for
 example `savlino/gcp-terraform-data-platform`, without `https://gitlab.com/`.
 `ci_environments` defaults to `["dev"]`; each selection creates `ci-plan-<env>`
-and `ci-apply-<env>` in ops. TEST/PROD accounts can be provisioned later, but their
-environment files and CI jobs are not supplied yet.
+and `ci-apply-<env>` in ops. TEST/PROD accounts can be provisioned later.
 
 `developer_principal` defaults null and accepts `user:`/`group:` email members
-only. When set, exactly two project-level roles are granted in **both DEV and
-TEST**, regardless of the CI environment selection or demo VM flag:
+only. `human_access_environments` defaults to `["dev", "test"]` and can only
+contain non-prod environments. When set, exactly two project-level roles are
+granted in those selected non-prod projects, regardless of the CI environment
+selection or demo VM flag:
 `roles/iam.serviceAccountTokenCreator` and `roles/iap.tunnelResourceAccessor`.
 There are no human PROD grants. These broad grants are intentional; OS Login
 authorization is a separate existing/manual prerequisite. No human access
@@ -156,6 +161,31 @@ remove old resource-scoped human IAM. See the ordered
 [migration, GitLab settings, exact auth snippet and negative test](../docs/runbook.md#gitlab-wif-bootstrap-and-mr-plans).
 Local mock tests verify trust/grants/input rejection; they do not establish live
 GitLab federation. No cloud bootstrap apply or MR pipeline is claimed here.
+
+## Shared ingestion image repository
+
+[registry.tf](registry.tf) owns the regional Docker repository `ops-ingest` in
+ops, with standard ops labels, immutable tags, an untagged-after-seven-days
+cleanup policy and `prevent_destroy`. `cleanup_policy_dry_run` is enabled for
+the initial apply to observe candidates before any deletions. `artifact_registry_region`
+defaults to `europe-southwest1`. The `ingest_image_repository` output is the
+tag/digest-free image path used by every environment; no environment state
+lookup is required.
+
+Bootstrap generates Cloud Run service identities for **all three** environment
+projects independently of `ci_environments`, then assigns each
+`roles/artifactregistry.reader` on this repository only. The email format is
+`service-<project-number>@serverless-robot-prod.iam.gserviceaccount.com`;
+the exported `cloud_run_service_agents` map exposes the generated identities.
+Enabled CI apply identities get the same scoped Reader for deployment checks,
+not Writer/Admin. Runtime accounts get no registry role. Normal Google-managed
+Cloud Run service-agent project roles must remain intact.
+
+Repositories cannot be moved across projects. Existing environment repositories
+are retained during the infra state migration, not deleted or imported into ops.
+Copy the chosen release, verify its digest and change the job image only after
+bootstrap and publishing succeed. See the
+[migration and negative checks](../docs/runbook.md#shared-ops-registry-migration).
 
 ## References
 

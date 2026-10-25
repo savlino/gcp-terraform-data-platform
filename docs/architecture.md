@@ -138,12 +138,22 @@ See [container verification](../app/README.md#container) for offline smoke check
 
 ## Managed execution
 
+Bootstrap owns one shared `ops-ingest` Artifact Registry repository in
+`dep-2610-ops`, region `europe-southwest1` by default. It creates the Cloud Run
+service identity in each environment and grants each
+`service-<project-number>@serverless-robot-prod.iam.gserviceaccount.com`
+repository-scoped Reader. Runtime service accounts receive no image-pull grants.
+CI apply identities also get repository-scoped Reader for deployment checks.
+The environment roots do not own registries.
+
 Artifact Registry has immutable tags and one cleanup policy: delete untagged
 versions older than seven days (failed/partial push leftovers). Tagged releases
 are intentionally retained and may accumulate. `image_tag` is selected in
-environment tfvars.
+environment tfvars. Optional `image_digest` takes precedence; identical shared
+`image_repository` and `image_digest` values deploy the exact same artifact to
+DEV/TEST/PROD, without copying between environment registries or rebuilding.
 `enable_ingest_job` defaults false for image-first provisioning: apply the
-repository, push the image, then enable the job/schedule. No automatic image
+shared repository through bootstrap, publish the image, then enable the job/schedule. No automatic image
 build or push is part of Terraform.
 
 The job retains the Python image entrypoint and uses `args = ["run"]`, one

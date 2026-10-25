@@ -7,8 +7,8 @@ for other environments.
 ## GitLab WIF bootstrap and MR plans
 
 This section is deployment guidance, not a record of live federation.
-Configuration is DEV-first, with lint/test/plan/apply stages but **no apply
-jobs**. TEST/PROD environment files/jobs are not supplied.
+Configuration uses lint/test/plan/policy for DEV/TEST/PROD, plus manual apply
+promotion (`apply:dev` -> `apply:test` -> `apply:prod`) on protected `main`.
 Read the [role catalogue and shared-state warning](security.md#gitlab-wif-and-ci-role-catalogue)
 before authorizing MR code. No keys, secret CI variables or AWS credentials are
 needed.
@@ -156,6 +156,38 @@ Offline negative cases are also in
 [bootstrap mock tests](../bootstrap/tests/wif.tftest.hcl): invalid project URL,
 unknown/empty CI environments, public human member and workload-as-human
 principal must all be rejected. Mock tests cannot prove live IAM denial.
+
+### Promote DEV -> TEST -> PROD
+
+Each environment is `infra/env/<env>.tfvars` plus `<env>.gcs.tfbackend` (state
+prefix `infra/<env>`); the Terraform code is identical. On the protected `main`
+branch every pipeline runs `plan:<env>` and `policy:<env>` for all three
+environments, and exposes manual `apply:dev` -> `apply:test` -> `apply:prod`.
+Each apply needs the previous apply, uses the plan file of the same pipeline,
+runs as `ci-apply-<env>`, and shares a `resource_group` with its plan job.
+Before applying, the job fails if the plan file or its commit marker is
+missing, or if the marker differs from `CI_COMMIT_SHA`; Terraform also rejects
+a saved plan when the state changed after planning.
+
+Prerequisites (not done by this repository change):
+
+1. Bootstrap: set `ci_environments = ["dev", "test", "prod"]` and apply it with
+   the bootstrap deployer. This creates `ci-plan/apply-test` and `-prod`, and
+   grants the prod apply identity broad roles on PROD; review the plan first.
+2. Copy the image into the ops repository (see the shared-registry runbook) and
+   set the same `image_tag` or `image_digest` in all three tfvars.
+3. GitLab (Free tier): protect `main` (maintainers push/merge); define the
+   non-secret variable `GCP_OPS_PROJECT_NUMBER`. Environments, `resource_group`
+   and manual jobs work on Free. Protected environments and deployment
+   approvals are **paid** features, so on Free any maintainer can press
+   `apply:prod`; the ordering and the manual click are the only gate.
+
+Verify: after each apply, re-run the pipeline; `plan:<env>` must print
+`No changes.`, and `terraform state list` must show the same resource addresses
+in all three projects (outputs differ only by project/CIDR names). Negative:
+start `apply:prod` before `apply:test` succeeded (it stays blocked), or delete
+`infra/prod.plan.sha` from a copied artifact and see the guard fail. Neither
+has been run live.
 
 ## Private network and IAP demo
 
@@ -357,11 +389,100 @@ anything fails, treat teardown as outstanding; there is no automatic TTL.
 
 These are **manual PowerShell on Windows** procedures, not evidence of a live
 deployment. See [module inputs and limits](../modules/ingest_job/README.md).
-The [DEV tfvars](../infra/env/dev.tfvars) initially has
-`enable_ingest_job = false`: the first apply adds the repository but no job or
-schedule. Do not use routine `-target` applies or a placeholder public image.
+Use `enable_ingest_job = false` for initial image-first provisioning: bootstrap
+creates the shared ops repository; infra creates no job or schedule until enabled.
+For an existing job, follow the migration below before changing its image.
+Do not use routine `-target` applies or a placeholder public image.
 
-### 1. Prerequisites and repository-first apply
+### Shared ops registry migration
+
+This is **not an in-place project move**: repositories/images cannot be relocated
+by changing a Terraform project argument. Bootstrap creates `ops-ingest` in ops.
+[registry_migration.tf](../infra/registry_migration.tf) removes the old
+`module.ingest_job.google_artifact_registry_repository.ingest` from environment
+state with `destroy = false`, retaining its images and rollback path. It does
+not copy them. Retained old repositories still incur storage charges.
+
+1. Pause scheduled launches and serialize deployments. Use the authorized local
+   bootstrap administrator's ADC and your existing billing/GitLab/human inputs.
+   Run `terraform -chdir=bootstrap init`, review/save the bootstrap plan, then
+   apply it. Expect the shared ops repository, three Cloud Run service identities,
+   repository-level Reader grants for all three agents, and Reader for configured
+   CI apply SAs. Environment registry Admin/Reader project grants on CI identities
+   are removed. Normal Cloud Run service-agent project roles must remain intact.
+2. Authorize a publisher separately with Reader on the old repository and Writer
+   on the new one. For a manually impersonated deployer, separately grant Reader
+   on the new repository too; bootstrap configures that automatically only for
+   the CI apply identities. Do not grant registry access to the runtime SA.
+3. Copy the exact existing release, not a rebuild. The following **PowerShell**
+   uses Buildx's single-source carbon-copy mode and rejects a changed digest.
+   Ensure your installed Buildx supports `--prefer-index=false`.
+
+```powershell
+$source = Read-Host 'Old complete image URI, including its immutable tag or digest'
+$tag = Read-Host 'Release tag to preserve in ops (not latest)'
+$publisher = Read-Host 'Authorized publisher service account email'
+if (-not $source -or -not $tag -or -not $publisher) { throw 'Copy inputs must not be empty' }
+$repository = terraform -chdir=bootstrap output -raw ingest_image_repository
+if ($LASTEXITCODE -ne 0 -or -not $repository) { throw 'Shared repository output is missing' }
+$destination = "${repository}:$tag"
+$previousImpersonation = $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT
+try {
+  $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT = $publisher
+  $registries = (@(($source -split '/')[0], ($repository -split '/')[0]) | Select-Object -Unique) -join ','
+  gcloud auth configure-docker $registries --quiet
+  if ($LASTEXITCODE -ne 0) { throw 'Docker auth configuration failed' }
+  $sourceManifest = docker buildx imagetools inspect $source --format '{{json .Manifest}}'
+  if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect source manifest' }
+  $digest = ($sourceManifest | ConvertFrom-Json).digest
+  if ($digest -notmatch '^sha256:[a-f0-9]{64}$') { throw 'Source digest is invalid' }
+  # Resolve the source to its immutable digest before copying.
+  $sourceRepository = ($source -split '@')[0] -replace ':[^/]+$', ''
+  docker buildx imagetools create --prefer-index=false --tag $destination "${sourceRepository}@$digest"
+  if ($LASTEXITCODE -ne 0) { throw 'Image copy failed; do not change job image' }
+  $destinationManifest = docker buildx imagetools inspect $destination --format '{{json .Manifest}}'
+  if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect destination manifest' }
+  if (($destinationManifest | ConvertFrom-Json).digest -ne $digest) {
+    throw 'Digest changed during copy; do not deploy this artifact'
+  }
+  Write-Output "Verified shared image: ${repository}@$digest"
+} finally {
+  if ($null -eq $previousImpersonation) {
+    Remove-Item Env:\CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT -ErrorAction SilentlyContinue
+  } else {
+    $env:CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT = $previousImpersonation
+  }
+}
+```
+
+4. Set `image_repository` to bootstrap's output and `image_digest` to the verified
+   digest in each environment's tfvars (keep the release `image_tag` for publishing
+   and traceability; digest takes precedence). Restore authorized infra-deployer
+   impersonated ADC, review a normal full environment plan, and apply manually.
+   The old repository must say it is no longer managed but **not destroyed**.
+   No stateful deletion override is needed for this migration. Do not delete old
+   images until rollout and rollback verification succeeds.
+5. **Positive verification:** inspect bootstrap's `cloud_run_service_agents`
+   output and repository IAM. Expected agents are the environment project numbers,
+   not the ops number. Use `gcloud artifacts repositories get-iam-policy ops-ingest
+   --project=dep-2610-ops --location=europe-southwest1` (PowerShell, one command).
+   Each must have Reader only at this repository. Describe each deployed job:
+   `gcloud run jobs describe <env>-ingest --project=<environment-project>
+   --region=europe-southwest1 --format=yaml`; its image must be the same
+   `.../dep-2610-ops/ops-ingest/ingest@sha256:...`. Execute a supervised DEV run
+   using the existing runbook and confirm no image-pull permission failure.
+6. **Negative verification:** as an authorized administrator, impersonate a
+   dedicated probe identity with Reader only on `ops-ingest` and no inherited
+   Writer/Admin. Attempting `docker push` to a fresh synthetic probe tag must
+   fail with permission denied. An Owner's access or merely creating a
+   credential configuration is not a valid negative test. Do not remove a live
+   service agent's Reader grant to test this.
+
+Local mock tests verify configured scopes/URIs/digest validation, not live
+cross-project pulls. Bootstrap's `prevent_destroy` protects the shared repository
+from accidental Terraform deletion; it is not an IAM deletion deny.
+
+### 1. Prerequisites and bootstrap-owned repository
 
 Infra, ingest and transform must already be deployed and verified, including
 raw Parquet aligned with the pinned external-table schema, native tables, runtime grants and
@@ -373,28 +494,29 @@ Scheduler service agents must retain their normal Google-managed service-agent
 roles. Do not grant those roles to workload accounts.
 
 Use the authorized Terraform deployer via impersonated ADC from
-[setup](setup.md). It additionally needs repository/job/schedule management,
+[setup](setup.md). It additionally needs shared-repository read and job/schedule management,
 job IAM get/set, service-account creation and `iam.serviceAccounts.actAs` on
-runtime and scheduler accounts. The same-project Cloud Run service agent pulls
-the image; the runtime does not need Artifact Registry Reader.
+runtime and scheduler accounts. The environment Cloud Run service agent pulls
+from ops using bootstrap's repository-level Reader; the runtime does not need it.
 An authorized publisher needs repository-scoped Artifact Registry Writer and
 your user must be allowed to impersonate it. This step does not create or grant
 publisher/deployer identities.
 
-Choose a unique `image_tag` in DEV tfvars.
-Keep `enable_ingest_job = false`; preserve any existing developer principal.
+Apply bootstrap first using its existing inputs to create the shared repository
+and all three service-agent Reader grants. Choose a unique `image_tag` in DEV
+tfvars; keep `image_digest = null` until a real published digest is available.
+Keep `enable_ingest_job = false` for first provisioning.
 
 ```powershell
 terraform -chdir=infra init -reconfigure -input=false '-backend-config=env/dev.gcs.tfbackend'
 terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Repository plan failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Infrastructure plan failed' }
 # Review the plan before continuing: no job/scheduler yet.
 terraform -chdir=infra apply dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Repository apply failed' }
+if ($LASTEXITCODE -ne 0) { throw 'Infrastructure apply failed' }
 ```
 
-If the preceding infrastructure is unchanged, expect just one new repository
-`dev-ingest` in `europe-southwest1`. Stop on unexpected deletions or environment
+No environment repository is created. Stop on unexpected deletions or environment
 changes. Full fresh infrastructure needs the earlier external-table bootstrap
 sequence; this is not a workaround for missing raw data.
 
@@ -406,8 +528,11 @@ the publisher identity, rather than silently pushing as your user. It restores
 the prior override afterward and never creates a service-account key.
 
 ```powershell
-$image = terraform -chdir=infra output -raw ingest_image_uri
-if ($LASTEXITCODE -ne 0 -or -not $image) { throw 'Image URI output is missing' }
+$repository = terraform -chdir=bootstrap output -raw ingest_image_repository
+if ($LASTEXITCODE -ne 0 -or -not $repository) { throw 'Image repository output is missing' }
+$tag = Read-Host 'Unique release image_tag from tfvars'
+if (-not $tag -or $tag -eq 'latest') { throw 'Explicit release tag is required' }
+$image = "${repository}:$tag"
 $registry = ($image -split '/')[0]
 $publisher = Read-Host 'Authorized image publisher service account email'
 if (-not $publisher) { throw 'Publisher SA email is empty' }
@@ -572,17 +697,17 @@ duration before increasing limits.
 
 ### Updating or stopping
 
-For an update, choose a new unique `image_tag` in tfvars, build/push that exact
-URI first, then review/apply the job change. Read `ingest_image_uri` only after
-state reflects that tag; for subsequent releases you can form the new URI from
-the existing registry/repository plus the tfvars tag without applying an
-unpublished image. Do not apply an enabled job pointing to an image not yet
-pushed. Keep releases serialized; immutable tags preserve rollbacks.
+For an update, build/push a new unique tag to the shared ops repository once.
+Verify its digest and set that same `image_digest` in every environment before
+reviewing/applying each job change. If using tag mode, clear `image_digest`
+explicitly; otherwise changing `image_tag` does not change the pinned job image.
+Do not apply a job pointing to an unpublished image. Keep releases serialized;
+immutable tags retain rollback artifacts.
 
 To stop future launches, set `scheduler_paused = true` and review/apply; this
 does not cancel active executions. Setting `enable_ingest_job = false` removes
 the job, schedule, scheduler identity and grant (subject to deletion protection),
-but keeps the repository. PROD protection requires an explicit reviewed change
+and does not affect the bootstrap-owned repository. PROD protection requires an explicit reviewed change
 before deleting the job. Repository cleanup is asynchronous and tagged images
 continue to consume storage.
 

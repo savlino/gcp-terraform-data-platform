@@ -7,7 +7,7 @@ demo_vm_zone       = "europe-southwest1-a"
 enable_iap_demo_vm = false
 image_tag          = "83ac391"
 
-# Enable only after pushing image_tag to the Terraform-created repository.
+# Enable only after the image_tag exists in the shared ops repository (image_repository default).
 enable_ingest_job = true
 scheduler_paused  = true
 

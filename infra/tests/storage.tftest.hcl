@@ -5,10 +5,10 @@ variables {
   project_id         = "dep-2610-dev"
   location           = "europe-southwest1"
   force_destroy      = true
-  raw_retention_days = 30
+  raw_retention_days = null
 }
 
-run "dev_bucket" {
+run "lifecycle_disabled_when_null" {
   command = plan
   module {
     source = "../modules/storage"
@@ -26,12 +26,10 @@ run "dev_bucket" {
 
   assert {
     condition = (
-      length(google_storage_bucket.raw.lifecycle_rule) == 1 &&
-      one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 30 &&
-      one(one(google_storage_bucket.raw.lifecycle_rule).action).type == "Delete" &&
+      length(google_storage_bucket.raw.lifecycle_rule) == 0 &&
       one(google_storage_bucket.raw.soft_delete_policy).retention_duration_seconds == 0
     )
-    error_message = "DEV raw objects must expire after 30 days without soft-delete retention."
+    error_message = "Null raw_retention_days must disable lifecycle deletion while keeping soft-delete disabled."
   }
 
   assert {
@@ -42,19 +40,32 @@ run "dev_bucket" {
   }
 }
 
-run "prod_bucket" {
+run "lifecycle_enabled_when_set" {
   command = plan
   module {
     source = "../modules/storage"
   }
   variables {
-    env           = "prod"
-    project_id    = "dep-2610-prod"
-    force_destroy = false
+    raw_retention_days = 30
   }
 
   assert {
-    condition     = length(google_storage_bucket.raw.lifecycle_rule) == 0 && !google_storage_bucket.raw.force_destroy
-    error_message = "PROD must not receive the non-prod expiration rule or force destruction."
+    condition = (
+      length(google_storage_bucket.raw.lifecycle_rule) == 1 &&
+      one(one(google_storage_bucket.raw.lifecycle_rule).condition).age == 30 &&
+      one(one(google_storage_bucket.raw.lifecycle_rule).action).type == "Delete"
+    )
+    error_message = "A positive raw_retention_days must create one Delete lifecycle rule with the configured age."
   }
+}
+
+run "reject_zero_retention" {
+  command = plan
+  module {
+    source = "../modules/storage"
+  }
+  variables {
+    raw_retention_days = 0
+  }
+  expect_failures = [var.raw_retention_days]
 }

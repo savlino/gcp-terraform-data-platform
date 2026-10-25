@@ -48,7 +48,7 @@ run "dev_wiring" {
 
   assert {
     condition = (
-      output.ingest_image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-dev/dev-ingest/ingest:root-test-v1" &&
+      output.ingest_image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest:root-test-v1" &&
       output.ingest_job_name == "dev-ingest" &&
       output.scheduler_job_name == "dev-ingest-weekly" &&
       output.runtime_service_account_email != output.scheduler_service_account_email
@@ -62,13 +62,35 @@ run "test_paused_by_default" {
   variables {
     env = "test"
   }
+  assert {
+    condition = (
+      output.ingest_image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest:root-test-v1" &&
+      output.scheduler_paused
+    )
+    error_message = "TEST must use the same ops image as DEV and keep the schedule paused by default."
+  }
 }
 
 run "prod_paused_by_default" {
   command = plan
   variables {
     env                 = "prod"
+    force_destroy       = false
+    raw_retention_days  = null
     deletion_protection = true
+  }
+  assert {
+    condition = (
+      output.ingest_image_uri == "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest/ingest:root-test-v1" &&
+      output.scheduler_paused &&
+      output.ingest_job_deletion_protection &&
+      output.native_tables_deletion_protected &&
+      output.external_table_deletion_protected &&
+      !output.dataset_delete_contents_on_destroy &&
+      output.raw_bucket_lifecycle_rule_count == 0 &&
+      !output.raw_bucket_force_destroy
+    )
+    error_message = "PROD must keep the schedule paused, propagate deletion protection to job/BigQuery, and keep bucket protection without a lifecycle rule."
   }
 }
 
@@ -76,6 +98,42 @@ run "explicit_dev_pause" {
   command = plan
   variables {
     scheduler_paused = true
+  }
+}
+
+run "dev_shared_digest" {
+  command = plan
+  variables {
+    image_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  assert {
+    condition     = output.ingest_image_uri == "${var.image_repository}@${var.image_digest}"
+    error_message = "DEV must use the pinned shared digest."
+  }
+}
+
+run "test_shared_digest" {
+  command = plan
+  variables {
+    env          = "test"
+    image_digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  assert {
+    condition     = output.ingest_image_uri == run.dev_shared_digest.ingest_image_uri
+    error_message = "TEST must use the exact same image URI and digest as DEV."
+  }
+}
+
+run "prod_shared_digest" {
+  command = plan
+  variables {
+    env                 = "prod"
+    deletion_protection = true
+    image_digest        = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  assert {
+    condition     = output.ingest_image_uri == run.dev_shared_digest.ingest_image_uri
+    error_message = "PROD must use the exact same image URI and digest as DEV."
   }
 }
 

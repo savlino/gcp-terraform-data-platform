@@ -5,9 +5,8 @@ scheduler_region   = "europe-west1"
 subnet_cidr        = "10.30.0.0/24"
 demo_vm_zone       = "europe-southwest1-a"
 enable_iap_demo_vm = false
-image_tag          = "83ac391"
-image_repository_url = "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest"
-image_digest         = "sha256:bcc8d2f28bc71f813cf5cff93dc5318621664052a354e64a478f872a6fbc6902"
+image_tag          = "fee8cd8"
+image_digest         = "sha256:e055b4a96daac07f82a8af5e4a5b5edb0592fe7d655f06b574064c3f17db040f"
 
 # The image must exist in the shared ops repository before the job is enabled.
 enable_ingest_job = true

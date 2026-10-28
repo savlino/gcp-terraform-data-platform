@@ -20,7 +20,7 @@ The [Dockerfile](Dockerfile) uses this combined command by default.
 | `SOURCE_REGION` | Source bucket's AWS region, not the GCP destination region | `us-west-2` |
 | `SOURCE_ENDPOINT` | Optional HTTPS origin overriding `https://{SOURCE_BUCKET}.s3.{SOURCE_REGION}.amazonaws.com` for listing/download (e.g. tests); must be a plain `https://` origin | Unset |
 | `SCHEMAS_DIR` | Shared schema directory for sync and build | Source checkout's `schemas/`; `/app/schemas` in Docker |
-| `SOURCE_SCHEMA_PATH` | Path to the shared JSON source contract; explicit relative paths use the working directory | `ookla_raw.json` under `SCHEMAS_DIR`, or source checkout's `schemas/` if unset |
+| `SOURCE_SCHEMA_PATH` | Path to the JSON allowed-types source contract; explicit relative paths use the working directory | `source_contract.json` under `SCHEMAS_DIR`, or source checkout's `schemas/` if unset |
 | `IMPERSONATE_SERVICE_ACCOUNT` | Optional runtime SA email for local impersonation | Unset: use ADC directly |
 
 An explicitly empty impersonation variable is an error, not a fallback to your
@@ -94,7 +94,7 @@ from ingest.build_config import BuildConfig
 assert sys.version_info[:2] == (3, 12)
 assert os.getuid() == 10001
 os.environ.update(PROJECT_ID="smoke", RAW_BUCKET="smoke-raw")
-assert Config.from_env().schema_path == Path("/app/schemas/ookla_raw.json")
+assert Config.from_env().schema_path == Path("/app/schemas/source_contract.json")
 assert BuildConfig.from_env().schema_path == Path("/app/schemas/ookla_tiles.json")
 for config in (Config.from_env(), BuildConfig.from_env()):
     assert json.loads(config.schema_path.read_text())
@@ -129,10 +129,12 @@ Cloud Run deployment and live combined execution are not verified here.
    and `SOURCE_BUCKET`
    to read only the eight-byte Parquet trailer and the footer metadata range.
    No row groups are read. Metadata larger than 16 MiB is explicitly rejected.
-   Required source columns are checked against [ookla_raw.json](../schemas/ookla_raw.json)
-   before any GCS upload. STRING accepts Arrow string/large_string; INTEGER
-   accepts signed integers; FLOAT accepts floating-point or signed integers
-   (older quarters store the latency-under-load columns as int32).
+   Required source columns are checked against
+   [source_contract.json](../schemas/source_contract.json) before any GCS upload.
+   The contract lists exact allowed footer types: down/up latency permits
+   int32 or double; other numeric columns retain their observed types.
+   Arrow string/large_string both represent the UTF-8 string columns.
+   A mismatch reports the column, found type and allowed types.
    Extra columns and nullable values are allowed; this is not row-level DQ.
 4. Stream HTTPS GET in 8 MiB chunks to a GCS resumable writer under
    `ookla/type=<type>/year=<year>/quarter=<quarter>/<filename>`. Set

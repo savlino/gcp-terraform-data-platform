@@ -6,6 +6,8 @@ subnet_cidr        = "10.20.0.0/24"
 demo_vm_zone       = "europe-southwest1-a"
 enable_iap_demo_vm = false
 image_tag          = "83ac391"
+image_repository_url = "europe-southwest1-docker.pkg.dev/dep-2610-ops/ops-ingest"
+image_digest         = "sha256:bcc8d2f28bc71f813cf5cff93dc5318621664052a354e64a478f872a6fbc6902"
 
 # The image must exist in the shared ops repository before the job is enabled.
 enable_ingest_job = true

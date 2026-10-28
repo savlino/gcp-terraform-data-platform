@@ -38,7 +38,7 @@ variables {
     mart_zoom            = 9
     minimum_row_percent  = 65
     latency_ceiling_ms   = 9000
-    source_schema_path   = "/app/schemas/ookla_raw.json"
+    source_schema_path   = "/app/schemas/source_contract.json"
     native_schema_path   = "/app/schemas/ookla_tiles.json"
   }
 }
@@ -85,7 +85,6 @@ run "prod_paused_by_default" {
       output.scheduler_paused &&
       output.ingest_job_deletion_protection &&
       output.native_tables_deletion_protected &&
-      output.external_table_deletion_protected &&
       !output.dataset_delete_contents_on_destroy &&
       output.raw_bucket_lifecycle_rule_count == 0 &&
       !output.raw_bucket_force_destroy

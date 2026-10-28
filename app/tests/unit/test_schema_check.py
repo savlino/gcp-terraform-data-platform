@@ -67,13 +67,20 @@ def test_footer_read_uses_configured_bucket(source_schema, schema_path):
     filesystem.open_input_file.assert_called_once_with("mirror-bucket/k/synthetic.parquet")
 
 
-def test_compatible_old_and_new_source_types(source_schema, schema_path):
+@pytest.mark.parametrize("layer", ["mobile", "fixed"])
+@pytest.mark.parametrize("latency_type", [pa.int32(), pa.float64()])
+def test_compatible_old_and_new_source_footers(source_schema, schema_path, layer, latency_type):
     fields = [
-        pa.field(f.name, pa.int32() if f.name.startswith("avg_lat_") else f.type)
+        pa.field(f.name, latency_type if f.name in ("avg_lat_down_ms", "avg_lat_up_ms") else f.type)
         for f in source_schema
     ]
-    check_schema(pa.schema(fields), schema_path)
-    check_schema(source_schema, schema_path)
+    data = parquet_bytes(pa.schema(fields))
+    filesystem = MagicMock()
+    filesystem.open_input_file.return_value = SizedBytes(data)
+    check_source(filesystem, SourceConfig(), f"{layer}/synthetic.parquet", len(data), schema_path)
+
+
+def test_string_representations_are_compatible(source_schema, schema_path):
     check_schema(
         source_schema.set(
             source_schema.get_field_index("quadkey"), pa.field("quadkey", pa.large_string())
@@ -86,8 +93,21 @@ def test_incompatible_type_fails(source_schema, schema_path):
     schema = source_schema.set(
         source_schema.get_field_index("tests"), pa.field("tests", pa.string())
     )
-    with pytest.raises(ValueError, match="tests: expected INTEGER"):
+    with pytest.raises(ValueError, match="tests: found string, allowed types: int64"):
         check_schema(schema, schema_path)
+
+
+@pytest.mark.parametrize("column", ["avg_lat_ms", "avg_lat_down_ms", "avg_lat_up_ms"])
+def test_string_latency_footer_fails(source_schema, schema_path, column):
+    schema = source_schema.set(
+        source_schema.get_field_index(column), pa.field(column, pa.string())
+    )
+    data = parquet_bytes(schema)
+    filesystem = MagicMock()
+    filesystem.open_input_file.return_value = SizedBytes(data)
+    allowed = "int64" if column == "avg_lat_ms" else "int32, double"
+    with pytest.raises(ValueError, match=f"{column}: found string, allowed types: {allowed}"):
+        check_source(filesystem, SourceConfig(), "synthetic.parquet", len(data), schema_path)
 
 
 def test_changed_size_fails_before_footer_read(source_schema, schema_path):
@@ -105,12 +125,16 @@ def test_invalid_trailer_rejected(schema_path):
         check_source(filesystem, SourceConfig(), "synthetic.parquet", 18, schema_path)
 
 
-def test_raw_contract_matches_native_source_columns(schema_path):
+def test_source_contract_matches_native_source_columns(schema_path):
     raw = json.loads(schema_path.read_text())
     native = json.loads(schema_path.with_name("ookla_tiles.json").read_text())
     native_types = {f["name"]: f["type"] for f in native}
     assert len(raw) == 11
-    assert all(native_types[f["name"]] == f["type"] for f in raw)
+    assert all(f["name"] in native_types for f in raw)
+    assert all(
+        native_types[name] == "FLOAT"
+        for name in ("avg_lat_ms", "avg_lat_down_ms", "avg_lat_up_ms")
+    )
 
 
 def test_oversized_footer_is_rejected_before_allocation(schema_path):

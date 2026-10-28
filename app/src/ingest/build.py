@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
@@ -45,6 +46,10 @@ class RawPartition:
     def stage_name(self) -> str:
         return f"stg_ookla_tiles_{self.network_type}_{self.year}q{self.quarter}"
 
+    @property
+    def raw_stage_name(self) -> str:
+        return f"stg_raw_{self.network_type}_{self.year}q{self.quarter}"
+
 
 def raw_partitions(
     gcs: storage.Client, config: Config, network_type: str, quarter: tuple[int, int] | None
@@ -82,12 +87,12 @@ def raw_partitions(
     return sorted(found.values(), key=lambda p: (p.year, p.quarter, p.network_type))
 
 
-def sql(name: str, dataset: str, stage: str = "") -> str:
+def sql(name: str, dataset: str, stage: str = "", raw_stage: str = "") -> str:
     return (
         files("ingest")
         .joinpath("sql", name + ".sql")
         .read_text(encoding="utf-8")
-        .format(dataset=dataset, stage=stage)
+        .format(dataset=dataset, stage=stage, raw_stage=raw_stage)
     )
 
 
@@ -160,18 +165,36 @@ def publish_partition(
         "managed_by": "terraform",
     }
     # A conflicting deterministic stage name fails instead of clobbering another build.
-    bq.create_table(table)
-    try:
+    with ExitStack() as cleanup:
+        bq.create_table(table)
+        cleanup.callback(bq.delete_table, stage_id, not_found_ok=True)
+        raw_stage_id = f"{dataset}.{partition.raw_stage_name}"
+        raw_table = bigquery.Table(raw_stage_id)
+        raw_table.expires = table.expires
+        raw_table.labels = table.labels
+        bq.create_table(raw_table)
+        cleanup.callback(bq.delete_table, raw_stage_id, not_found_ok=True)
+        bq.load_table_from_uri(
+            partition.uri,
+            raw_stage_id,
+            job_config=bigquery.LoadJobConfig(
+                source_format=bigquery.SourceFormat.PARQUET,
+                autodetect=True,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                create_disposition=bigquery.CreateDisposition.CREATE_NEVER,
+            ),
+            location=settings.location,
+        ).result()
         parameters = partition_parameters(partition, settings, datetime.now(UTC))
         query(
             bq,
             settings,
-            sql("stage", dataset, stage_id),
+            sql("stage", dataset, stage_id, raw_stage_id),
             parameters,
             destination=stage_id,
             collect=False,
         )
-        rows = query(bq, settings, sql("quality", dataset, stage_id), parameters)
+        rows = query(bq, settings, sql("quality", dataset, stage_id, raw_stage_id), parameters)
         if len(rows) != 1:
             raise ValueError("DQ query did not return exactly one aggregate row.")
         stats = dict(rows[0].items())
@@ -197,8 +220,6 @@ def publish_partition(
             result.rows,
         )
         return result
-    finally:
-        bq.delete_table(stage_id, not_found_ok=True)
 
 
 def build(

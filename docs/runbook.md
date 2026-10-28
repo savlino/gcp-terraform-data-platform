@@ -189,6 +189,93 @@ start `apply:prod` before `apply:test` succeeded (it stays blocked), or delete
 `infra/prod.plan.sha` from a copied artifact and see the guard fail. Neither
 has been run live.
 
+## Per-file schema migration
+
+The source changed down/up latency physical types from INT32 to DOUBLE in
+2026-Q2 for both network types. See [the footer evidence](source-schema.md).
+The shared `ext_ookla_raw` resource is removed. `ookla_tiles.avg_lat_ms`
+changes from INTEGER to FLOAT (FLOAT64); **Terraform may replace the native
+table**, losing its curated data. The down/up fields were already FLOAT.
+Raw objects are not deleted by this migration.
+
+1. Pause the environment's Scheduler and stop other writers. Confirm all raw
+   quarters required for recovery still exist: DEV/TEST lifecycle deletion may
+   already have expired them. Restore missing raw files with sync before
+   removing curated data. Do not rely on `load_log` as a raw backup.
+2. Review a saved plan per environment, including the correct state backend.
+   Expect the external-table delete and, if required by the provider, only
+   the intended `ookla_tiles` replacement. No dataset, bucket, secret or mart
+   deletion is intended. If affected existing tables have
+   `deletion_protection = true`, first disable protection **only on those
+   tables** in a separately reviewed preparatory apply while their resources
+   still exist; removing protected resources from configuration alone does
+   not unlock deletion. Restore native-table protection after migration.
+3. P10 deliberately blocks the delete/replacement. Use `--allow-destroy`
+   for this reviewed migration plan only, or a one-pipeline
+   `ALLOW_DESTROY=true` override for the existing CI checker. The override
+   disables **all of P10**, not an address-specific exception; review every
+   deletion. Never persist it in CI configuration or project variables.
+   P1-P9 and P11 remain active.
+4. Apply the reviewed saved plan, then deploy a newly built image containing
+   the new source contract and SQL. Existing image tags/digests do not gain
+   these changes automatically. If `SOURCE_SCHEMA_PATH` is explicitly set,
+   change it to `source_contract.json` (default `/app/schemas/source_contract.json`
+   in the container). The retired `ookla_raw.json` format is no longer used.
+5. Run the forced regression checks below for both eras and network types.
+   If `ookla_tiles` was replaced, run a **full forced rebuild** over all raw
+   quarters, not just the two regression quarters: `load_log` may still
+   contain matching SUCCESS rows for data that was removed.
+6. Confirm curated and mart results, one successful watermark per rebuilt
+   slice, no leftover owned stages, and a clean second Terraform plan.
+   Remove the destroy override and resume Scheduler only after review.
+
+**PowerShell, repository root**, using the deployer credentials described in
+[setup](setup.md), with `$envName` set explicitly:
+
+```powershell
+$envName = 'dev'
+terraform -chdir=infra init -reconfigure -lockfile=readonly "-backend-config=env\$envName.gcs.tfbackend"
+terraform -chdir=infra plan "-var-file=env\$envName.tfvars" "-out=$envName.tfplan"
+if ($LASTEXITCODE -ne 0) { throw 'Migration plan failed.' }
+terraform -chdir=infra show -json "$envName.tfplan" > "infra\$envName.plan.json"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot render migration plan.' }
+
+# Negative: P10 must reject a plan containing the table delete/replacement.
+.\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName
+if ($LASTEXITCODE -ne 1) { throw 'Expected P10 rejection; inspect plan and ALLOW_DESTROY.' }
+# Only after reviewing all deletes:
+.\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName --allow-destroy
+if ($LASTEXITCODE -ne 0) { throw 'Another policy rule failed; do not apply.' }
+terraform -chdir=infra apply "$envName.tfplan"
+```
+
+For the application checks, use runtime impersonation/configuration from
+[raw ingestion](#raw-ingestion) and [build configuration](../app/BUILD.md),
+not the deployer identity. Local commands use the updated source checkout;
+also verify the deployed image separately. These are billed loads/queries:
+raw stages temporarily store the full global file and every query has the
+configured `MAXIMUM_BYTES_BILLED`.
+
+```powershell
+foreach ($layer in 'mobile', 'fixed') {
+  foreach ($quarter in '2026-Q1', '2026-Q2') {
+    .\app\.venv\Scripts\python.exe -m ingest build --type $layer --quarter $quarter --force
+    if ($LASTEXITCODE -ne 0) { throw "Forced regression failed: $layer $quarter" }
+  }
+}
+# Required after replacement, provided every needed raw file is present:
+.\app\.venv\Scripts\python.exe -m ingest build --type all --force
+if ($LASTEXITCODE -ne 0) { throw 'Full raw rebuild failed.' }
+```
+
+Expected: DQ passes and each forced slice publishes even when ETags match;
+all three latency columns are FLOAT64, source row counts come from each
+individual loaded file, and both network types remain present for each rebuilt
+quarter. A subsequent non-forced build skips those slices (`partitions=0`,
+`DQ=NOT_RUN`) but still rebuilds the mart. The offline negative string-latency
+footer tests must raise a column/found/allowed-types error before transfer.
+These live checks have not been performed by the assistant.
+
 ## Private network and IAP demo
 
 All commands in this section are **PowerShell on Windows**, repository root.

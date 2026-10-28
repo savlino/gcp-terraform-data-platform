@@ -1,8 +1,8 @@
 # Curated build, quality and mart
 
 `python -m ingest build --type mobile --quarter 2023-Q3` processes raw GCS
-objects already written by sync. It does not call AWS or create the external
-table. Terraform must have created `ext_ookla_raw` and the native tables.
+objects already written by sync. It does not call AWS. Terraform must have
+created the three native tables; no shared external table is used.
 
 ## Configuration
 
@@ -49,10 +49,19 @@ supplied `dep-2610-dev/test/prod` naming convention.
   expiration before submitting the transform. An existing stage name fails;
   it is not overwritten. Clean up owned stages on success or failure; expiration
   is the fallback after process termination.
-- The parameterized transform filters exact Hive type/year/quarter, exact
-  `_FILE_NAME`, and bbox coordinates. It adds quarter/type/load timestamp and
-  converts kbps to decimal Mbps. Only staging uses `WRITE_TRUNCATE`; stage query
-  results are not downloaded into Python.
+- Reserve `stg_raw_<type>_<yyyy>q<q>` with a one-day expiration, then load the
+  selected GCS URI with a Parquet load job (`autodetect`, `WRITE_TRUNCATE`,
+  `CREATE_NEVER`). Wait for load completion before any transform/DQ query.
+  The schema is inferred per file, supporting both INT32 and DOUBLE latency
+  eras without relying on a global external-table schema.
+- The parameterized transform reads that raw stage and filters bbox coordinates.
+  It adds quarter/type/load timestamp, explicitly casts every numeric source
+  column (all latencies to FLOAT64), and converts kbps to decimal Mbps.
+  DQ counts global source rows from this same raw stage. Only staging uses
+  `WRITE_TRUNCATE`; load/query rows are not downloaded into Python.
+  Both owned stages are cleaned up on success or failure. Raw loading reads
+  the full file and temporarily stores it in BigQuery; the query byte cap
+  does not cap load volume or temporary storage.
 
 ## Data quality
 
@@ -123,8 +132,11 @@ Run only one sync/build writer per environment at a time. Deterministic stages
 reject same-slice overlap, but do not provide a global lock. The generation
 recheck narrows, but cannot eliminate, races with concurrent sync or external
 writers. Changed raw files after publication will be selected on a later run.
-Mixed physical Parquet types in the external table can still fail BigQuery
-reads; casts do not normalize a file that the external reader cannot decode.
+Read-path changes require a **forced rebuild** of old and new latency eras:
+for each network type, run `build --type <type> --quarter 2026-Q1 --force`
+and `build --type <type> --quarter 2026-Q2 --force` as a regression check.
+Then rebuild all available raw quarters with `build --type all --force`.
+Matching ETag/SUCCESS watermarks otherwise skip the new read path.
 
 ## Telegram
 

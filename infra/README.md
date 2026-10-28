@@ -69,9 +69,10 @@ not by this root or CI-managed child modules.
 - The `alert-telegram` secret has user-managed replication in `region` and a
   secret-scoped runtime accessor grant. No versions or values are in Terraform;
   follow [manual provisioning and verification](../docs/security.md).
-- `ext_ookla_raw` pins `schemas/ookla_raw.json` and uses typed CUSTOM Hive
-  partitions. DEV MR plans use the bootstrap-owned WIF plan identity; no CI apply
-  jobs are configured yet.
+- Only the three native BigQuery tables are Terraform-managed. Runtime uses
+  per-file autodetected raw load stages, not a shared external table.
+  See [schema migration](../docs/runbook.md#per-file-schema-migration) before
+  applying the external-table removal and curated latency type change.
 
 ## Prerequisites and authentication
 
@@ -179,33 +180,22 @@ days; tagged releases accumulate by design.
 gcloud storage buckets describe gs://dep-2610-dev-raw --impersonate-service-account=$sa
 bq --impersonate_service_account=$sa --format=prettyjson show dep-2610-dev:network_perf
 bq --impersonate_service_account=$sa ls dep-2610-dev:network_perf
-foreach ($table in 'ookla_tiles', 'load_log', 'mart_quarterly_performance', 'ext_ookla_raw') {
+foreach ($table in 'ookla_tiles', 'load_log', 'mart_quarterly_performance') {
   bq --impersonate_service_account=$sa --format=prettyjson show "dep-2610-dev:network_perf.$table"
 }
 ```
 
 Expected: raw bucket in `EUROPE-SOUTHWEST1`, uniform access, public access
 prevention enforced, 30-day delete rule; dataset in the same region without
-`defaultTableExpirationMs`; three native tables and `ext_ookla_raw`.
+`defaultTableExpirationMs`; three Terraform-managed native tables. Runtime
+stages may exist while a build is running and expire after one day.
 Curated and mart tables have DAY partitioning on `quarter_start` with
 `requirePartitionFilter: true`. The load log is unpartitioned.
 
-The external table must show PARQUET, the pinned source schema, the raw source
-URI and CUSTOM Hive options with `requirePartitionFilter: true`. To verify in GCP,
-use a quarter already uploaded to raw storage:
-
-```powershell
-$sql = 'SELECT quadkey FROM `dep-2610-dev.network_perf.ext_ookla_raw` WHERE type = ''mobile'' AND year = 2023 AND quarter = 3 LIMIT 1'
-bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 query --use_legacy_sql=false --maximum_bytes_billed=1073741824 $sql
-if ($LASTEXITCODE -ne 0) { throw 'Filtered external query failed.' }
-$sql = 'SELECT quadkey FROM `dep-2610-dev.network_perf.ext_ookla_raw` LIMIT 1'
-bq --impersonate_service_account=$sa --project_id=dep-2610-dev --location=europe-southwest1 query --use_legacy_sql=false --maximum_bytes_billed=1073741824 $sql
-if ($LASTEXITCODE -eq 0) { throw 'External query without a partition filter was accepted.' }
-```
-
-The negative query must fail for a missing Hive partition filter, not permissions
-or a billing cap. Each query is capped at 1 GiB billed; LIMIT does not itself
-bound scanned bytes.
+All latency fields in `ookla_tiles` must be FLOAT (FLOAT64); the shared
+external table is no longer configured. Use the
+[per-file regression checks](../docs/runbook.md#per-file-schema-migration)
+to exercise actual loads across both physical-type eras.
 
 Positive partition-filter query (empty result is expected before ingestion):
 

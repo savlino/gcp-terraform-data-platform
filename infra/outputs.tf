@@ -53,11 +53,6 @@ output "native_tables_deletion_protected" {
   value       = module.bigquery.native_tables_deletion_protected
 }
 
-output "external_table_deletion_protected" {
-  description = "Deletion protection state of ext_ookla_raw."
-  value       = module.bigquery.external_table_deletion_protected
-}
-
 output "dataset_delete_contents_on_destroy" {
   description = "Dataset delete_contents_on_destroy flag."
   value       = module.bigquery.dataset_delete_contents_on_destroy

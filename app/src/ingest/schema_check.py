@@ -15,20 +15,15 @@ def check_schema(actual: pa.Schema, schema_path: Path) -> None:
     expected = json.loads(schema_path.read_text(encoding="utf-8"))
     failures: list[str] = []
     for field in expected:
-        name, expected_type = field["name"], field["type"]
+        name, allowed_types = field["name"], field["types"]
         if actual.names.count(name) != 1:
             failures.append(f"{name}: missing or duplicated")
             continue
-        actual_type = actual.field(name).type
-        compatible = {
-            "STRING": pa.types.is_string(actual_type) or pa.types.is_large_string(actual_type),
-            "INTEGER": pa.types.is_signed_integer(actual_type),
-            "FLOAT": pa.types.is_floating(actual_type) or pa.types.is_signed_integer(actual_type),
-        }
-        if expected_type not in compatible:
-            raise ValueError(f"Unsupported source contract type: {expected_type}")
-        if not compatible[expected_type]:
-            failures.append(f"{name}: expected {expected_type}, got {actual_type}")
+        actual_type = str(actual.field(name).type)
+        if actual_type not in allowed_types:
+            failures.append(
+                f"{name}: found {actual_type}, allowed types: {', '.join(allowed_types)}"
+            )
     if failures:
         raise ValueError("Incompatible source Parquet schema: " + "; ".join(failures))
 

@@ -105,6 +105,6 @@ class Config:
             bucket,
             parse_quarter(os.environ.get("MIN_QUARTER", "2023-Q3")),
             SourceConfig.from_env(),
-            schema_path("ookla_raw.json", "SOURCE_SCHEMA_PATH"),
+            schema_path("source_contract.json", "SOURCE_SCHEMA_PATH"),
             target.strip() if target is not None else None,
         )

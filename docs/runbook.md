@@ -189,6 +189,131 @@ start `apply:prod` before `apply:test` succeeded (it stays blocked), or delete
 `infra/prod.plan.sha` from a copied artifact and see the guard fail. Neither
 has been run live.
 
+## Per-file schema migration
+
+The source changed down/up latency physical types from INT32 to DOUBLE in
+2026-Q2 for both network types. See [the footer evidence](source-schema.md).
+The shared `ext_ookla_raw` resource is no longer managed. It is **forgotten**
+with a `removed { destroy = false }` block in
+[registry_migration.tf](../infra/registry_migration.tf), not destroyed: in PROD
+the table was applied with `deletion_protection = true`, and Terraform refuses
+to destroy a protected table even when the resource is deleted from
+configuration in the same apply. The leftover table is deleted by hand after
+apply (step 4). `ookla_tiles.avg_lat_ms` changes from INTEGER to FLOAT
+(FLOAT64); **Terraform may replace the native table**, losing its curated data.
+The down/up fields were already FLOAT. Raw objects are not deleted by this
+migration.
+
+1. Pause the environment's Scheduler and stop other writers. Confirm all raw
+   quarters required for recovery still exist: DEV/TEST lifecycle deletion may
+   already have expired them. Restore missing raw files with sync before
+   removing curated data. Do not rely on `load_log` as a raw backup.
+2. Review a saved plan per environment, including the correct state backend.
+   Expect `ext_ookla_raw` to appear as "will no longer be managed" (forget),
+   not as a delete, and, if required by the provider, only the intended
+   `ookla_tiles` replacement. No dataset, bucket, secret or mart deletion is
+   intended. Do not first disable `deletion_protection` on the external table:
+   the `removed` block makes that preparatory apply unnecessary. If the plan
+   shows `ookla_tiles` being replaced while it has `deletion_protection = true`
+   (PROD), disable protection **only on that table** in a separately reviewed
+   preparatory apply while its resource still exists; removing protected
+   resources from configuration alone does not unlock deletion. Restore
+   protection after migration.
+3. P10 blocks only delete/replacement of stateful resources. The forgotten
+   external table does not trigger it. If the plan still contains a reviewed
+   `ookla_tiles` replacement, use `--allow-destroy` for that plan only, or a
+   one-pipeline `ALLOW_DESTROY=true` override for the existing CI checker. The
+   override disables **all of P10**, not an address-specific exception; review
+   every deletion. Never persist it in CI configuration or project variables.
+   P1-P9 and P11 remain active.
+4. Apply the reviewed saved plan, then delete the forgotten external table by
+   hand in each environment (the `bq rm` commands below). Then deploy a newly
+   built image containing the new source contract and SQL. Existing image
+   tags/digests do not gain these changes automatically. If
+   `SOURCE_SCHEMA_PATH` is explicitly set, change it to `source_contract.json`
+   (default `/app/schemas/source_contract.json` in the container). The retired
+   `ookla_raw.json` format is no longer used.
+5. Run the forced regression checks below for both eras and network types.
+   If `ookla_tiles` was replaced, run a **full forced rebuild** over all raw
+   quarters, not just the two regression quarters: `load_log` may still
+   contain matching SUCCESS rows for data that was removed.
+6. Confirm curated and mart results, one successful watermark per rebuilt
+   slice, no leftover owned stages, and a clean second Terraform plan.
+   Remove the destroy override (if one was used) and resume Scheduler only
+   after review. Once all three environments have applied the `removed` block,
+   it may be deleted from `registry_migration.tf` in a later change.
+
+**PowerShell, after the apply of each environment.** The table holds only
+metadata; the raw objects in the bucket are not touched. Run it only after the
+saved plan was applied, otherwise Terraform will see an unexpected deletion:
+
+```powershell
+$project = 'dep-2610-dev'   # repeat for dep-2610-test and dep-2610-prod
+bq --project_id=$project --location=europe-southwest1 show "${project}:network_perf.ext_ookla_raw"
+if ($LASTEXITCODE -ne 0) { throw 'Expected the forgotten table to still exist before manual deletion.' }
+bq --project_id=$project --location=europe-southwest1 rm -f -t "${project}:network_perf.ext_ookla_raw"
+if ($LASTEXITCODE -ne 0) { throw 'Table deletion failed.' }
+# Negative: the table must be gone.
+bq --project_id=$project --location=europe-southwest1 show "${project}:network_perf.ext_ookla_raw"
+if ($LASTEXITCODE -eq 0) { throw 'Table still exists.' }
+```
+
+`terraform -chdir=infra state list` for the environment must not contain
+`ext_ookla_raw`, and a second plan must be empty.
+
+**PowerShell, repository root**, using the deployer credentials described in
+[setup](setup.md), with `$envName` set explicitly:
+
+```powershell
+$envName = 'dev'
+terraform -chdir=infra init -reconfigure -lockfile=readonly "-backend-config=env\$envName.gcs.tfbackend"
+terraform -chdir=infra plan "-var-file=env\$envName.tfvars" "-out=$envName.tfplan"
+if ($LASTEXITCODE -ne 0) { throw 'Migration plan failed.' }
+terraform -chdir=infra show -json "$envName.tfplan" > "infra\$envName.plan.json"
+if ($LASTEXITCODE -ne 0) { throw 'Cannot render migration plan.' }
+
+# P10 must reject only if the plan still contains a stateful delete/replacement
+# (for example the reviewed ookla_tiles replacement). The forgotten external
+# table must not cause it.
+.\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName
+$p10 = $LASTEXITCODE
+if ($p10 -eq 0) { Write-Output 'P10 passed: no stateful delete/replacement in this plan.' }
+elseif ($p10 -ne 1) { throw 'Policy check failed unexpectedly.' }
+# Only after reviewing all deletes, and only if the previous check exited 1:
+if ($p10 -eq 1) {
+  .\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName --allow-destroy
+  if ($LASTEXITCODE -ne 0) { throw 'Another policy rule failed; do not apply.' }
+}
+terraform -chdir=infra apply "$envName.tfplan"
+```
+
+For the application checks, use runtime impersonation/configuration from
+[raw ingestion](#raw-ingestion) and [build configuration](../app/BUILD.md),
+not the deployer identity. Local commands use the updated source checkout;
+also verify the deployed image separately. These are billed loads/queries:
+raw stages temporarily store the full global file and every query has the
+configured `MAXIMUM_BYTES_BILLED`.
+
+```powershell
+foreach ($layer in 'mobile', 'fixed') {
+  foreach ($quarter in '2026-Q1', '2026-Q2') {
+    .\app\.venv\Scripts\python.exe -m ingest build --type $layer --quarter $quarter --force
+    if ($LASTEXITCODE -ne 0) { throw "Forced regression failed: $layer $quarter" }
+  }
+}
+# Required after replacement, provided every needed raw file is present:
+.\app\.venv\Scripts\python.exe -m ingest build --type all --force
+if ($LASTEXITCODE -ne 0) { throw 'Full raw rebuild failed.' }
+```
+
+Expected: DQ passes and each forced slice publishes even when ETags match;
+all three latency columns are FLOAT64, source row counts come from each
+individual loaded file, and both network types remain present for each rebuilt
+quarter. A subsequent non-forced build skips those slices (`partitions=0`,
+`DQ=NOT_RUN`) but still rebuilds the mart. The offline negative string-latency
+footer tests must raise a column/found/allowed-types error before transfer.
+These live checks have not been performed by the assistant.
+
 ## Private network and IAP demo
 
 All commands in this section are **PowerShell on Windows**, repository root.

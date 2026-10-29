@@ -1,0 +1,13 @@
+[
+  {"name": "quadkey", "types": ["string", "large_string"]},
+  {"name": "tile", "types": ["string", "large_string"]},
+  {"name": "tile_x", "types": ["double"]},
+  {"name": "tile_y", "types": ["double"]},
+  {"name": "avg_d_kbps", "types": ["int64"]},
+  {"name": "avg_u_kbps", "types": ["int64"]},
+  {"name": "avg_lat_ms", "types": ["int64"]},
+  {"name": "avg_lat_down_ms", "types": ["int32", "double"]},
+  {"name": "avg_lat_up_ms", "types": ["int32", "double"]},
+  {"name": "tests", "types": ["int64"]},
+  {"name": "devices", "types": ["int64"]}
+]

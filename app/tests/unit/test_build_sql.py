@@ -44,9 +44,7 @@ def test_bad_synthetic_partition_stops_and_valid_publish_preserves_other_type(sc
                 for field in fields
             )
             connection.execute(f"CREATE TABLE {name} ({columns})")
-        connection.execute(
-            "CREATE TABLE ext_ookla_raw (type TEXT, year INTEGER, quarter INTEGER, _FILE_NAME TEXT)"
-        )
+        connection.execute("CREATE TABLE raw_stage (quadkey TEXT)")
         row = dict(
             network_type="mobile",
             quarter_start="2023-07-01",
@@ -85,8 +83,8 @@ def test_bad_synthetic_partition_stops_and_valid_publish_preserves_other_type(sc
             source_rows=1,
             loaded_rows=1,
         )
-        connection.execute("INSERT INTO ext_ookla_raw VALUES ('mobile',2023,3,'gs://raw/file')")
-        quality_sql = local_sql(sql("quality", "dataset", "stage"))
+        connection.execute("INSERT INTO raw_stage VALUES ('0000000000000000')")
+        quality_sql = local_sql(sql("quality", "dataset", "stage", "raw_stage"))
         bad_stats = dict(connection.execute(quality_sql, parameters).fetchone())
         assert bad_stats["invalid_devices"] == 1
         assert bad_stats["invalid_devices_example"] == "0" * 16
@@ -129,3 +127,22 @@ def test_bad_synthetic_partition_stops_and_valid_publish_preserves_other_type(sc
         ).fetchall()
         assert [tuple(r) for r in rows] == [("fixed", "2026-01-01"), ("mobile", "2026-01-02")]
         assert connection.execute("SELECT source_etag FROM load_log").fetchone()[0] == "opaque-7"
+
+
+def test_stage_casts_every_numeric_source_column_to_native_type(schema_path):
+    native = json.loads(schema_path.with_name("ookla_tiles.json").read_text())
+    contract = json.loads(schema_path.read_text())
+    source_names = {field["name"] for field in contract}
+    rendered = sql("stage", "dataset", raw_stage="dataset.stg_raw_mobile_2026q2")
+    numeric = {
+        field["name"]: {"INTEGER": "INT64", "FLOAT": "FLOAT64"}[field["type"]]
+        for field in native
+        if field["name"] in source_names and field["type"] in ("INTEGER", "FLOAT")
+    }
+    assert len(numeric) == 9
+    for name, target in numeric.items():
+        assert f"CAST({name} AS {target}) AS {name}" in rendered
+    for name in ("avg_lat_ms", "avg_lat_down_ms", "avg_lat_up_ms"):
+        assert numeric[name] == "FLOAT64"
+    assert "CAST(avg_d_kbps AS FLOAT64) / 1000 AS avg_d_mbps" in rendered
+    assert "CAST(avg_u_kbps AS FLOAT64) / 1000 AS avg_u_mbps" in rendered

@@ -7,7 +7,7 @@
   {"name": "tile_y", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "avg_d_kbps", "type": "INTEGER", "mode": "NULLABLE"},
   {"name": "avg_u_kbps", "type": "INTEGER", "mode": "NULLABLE"},
-  {"name": "avg_lat_ms", "type": "INTEGER", "mode": "NULLABLE"},
+  {"name": "avg_lat_ms", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "avg_lat_down_ms", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "avg_lat_up_ms", "type": "FLOAT", "mode": "NULLABLE"},
   {"name": "tests", "type": "INTEGER", "mode": "NULLABLE"},

@@ -1,7 +1,6 @@
 # BigQuery module
 
-Creates the `network_perf` dataset, three empty native tables and the
-`ext_ookla_raw` external table. No dataset
+Creates the `network_perf` dataset and three empty native tables. No dataset
 default table expiration, table expiration or partition expiration is configured.
 No IAM grants or data-loading/query jobs are created.
 
@@ -10,7 +9,6 @@ No IAM grants or data-loading/query jobs are created.
 | `project_id` | Existing environment project | Required |
 | `env` | Environment label (`dev`, `test`, `prod`) | Required |
 | `location` | Same regional location as raw storage | Required |
-| `raw_bucket_name` | Raw bucket name from the storage module output | Required |
 | `deletion_protection` | Prevent Terraform table deletion | `true` |
 | `delete_contents_on_destroy` | Allow dataset deletion with contents | `false` |
 
@@ -30,8 +28,8 @@ validate dates are quarter starts and replace only the selected network type,
 not overwrite the other type in the same partition. The application must enforce
 grain uniqueness and watermark updates; Terraform only creates schemas.
 
-The latency-under-load columns use FLOAT (BigQuery FLOAT64), matching
-[the source schema](../../docs/source-schema.md). INTEGER maps to INT64 and
+All latency columns use FLOAT (BigQuery FLOAT64), normalizing the physical
+types in [the source schema](../../docs/source-schema.md). INTEGER maps to INT64 and
 STRING represents the source Arrow large_string columns. `tile` remains WKT,
 not a BigQuery GEOGRAPHY value. Derived speeds use decimal Mbps (`kbps / 1000`).
 Weighted mart latencies use FLOAT even where the source metric is INTEGER.
@@ -39,13 +37,7 @@ The application's [build command](../../app/BUILD.md) implements aggregations,
 quality checks and transactional data population; live BigQuery execution is
 still unverified. Terraform creates the tables but does not run those jobs.
 
-`ext_ookla_raw` pins the shared [raw schema](../../schemas/ookla_raw.json) and
-uses PARQUET over `gs://<raw>/ookla/*`, with CUSTOM Hive partition types declared by
-`gs://<raw>/ookla/{type:STRING}/{year:INTEGER}/{quarter:INTEGER}`.
-The Hive options require a partition filter. Labels and the existing
-`deletion_protection` variable apply to this table as well.
-This avoids autodetect drift when source quarters mix physical Parquet types
-for nullable latency columns. BigQuery appends the Hive keys `type`, `year` and
-`quarter` to the stored schema; `ignore_auto_generated_schema = true` keeps
-those server-added columns from forcing a replacement on every plan.
-Terraform manages the external table; the application does not create it.
+There is no shared external table. The application loads one raw object at a
+time with autodetection into an expiring `stg_raw_<type>_<yyyy>q<q>` table and
+normalizes its numeric types in SQL before DQ and publication. Runtime stages
+are not managed by Terraform. See [architecture](../../docs/architecture.md).

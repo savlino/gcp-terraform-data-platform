@@ -75,7 +75,7 @@ def test_explicit_relative_schema_path_preserved(environment, monkeypatch, tmp_p
 @pytest.mark.parametrize(
     ("factory", "override", "filename"),
     [
-        (Config.from_env, "SOURCE_SCHEMA_PATH", "ookla_raw.json"),
+        (Config.from_env, "SOURCE_SCHEMA_PATH", "source_contract.json"),
         (BuildConfig.from_env, "NATIVE_SCHEMA_PATH", "ookla_tiles.json"),
     ],
 )

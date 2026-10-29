@@ -140,6 +140,9 @@ data provider's documentation and shaped the design.
 - **Docs:** https://googlecloudplatform.github.io/magic-modules/best-practices/labels-and-annotations/
 
 ### BigQuery appends Hive partition keys to a pinned schema
+- **Historical workaround, now removed:** this solved Terraform schema drift,
+  not Parquet read compatibility. The shared external table and its schema-ignore
+  setting are removed by the per-file load migration described below.
 - **What happened:** after replacing autodetect on `ext_ookla_raw` with the schema from
   `schemas/ookla_raw.json`, the plan showed `schema` "forces replacement". The stored table schema
   contained `type`, `year` and `quarter`: BigQuery adds the Hive partition keys from the URI prefix
@@ -195,6 +198,8 @@ data provider's documentation and shaped the design.
 ## Plan policy in CI
 
 ### The policy check caught perpetual drift that looked like a normal plan
+- **Historical context:** the external table and its schema-ignore workaround
+  have since been removed; P10 still guards intentional stateful migrations.
 - **What happened:** after the schema fix, the MR plan listed one replacement next to ordinary changes.
   In a plan review it read as the expected one-off consequence of the fix. `policy:dev` failed on
   rule P10 (delete or replacement of a stateful resource), and reading that diff showed the cause
@@ -209,6 +214,23 @@ data provider's documentation and shaped the design.
   `terraform state list` and the backend the plan was made with.
 
 ## Multi-environment rollout precautions
+
+### Source physical types changed in 2026-Q2
+- **Evidence:** the footer scan found `avg_lat_down_ms` and `avg_lat_up_ms` as
+  int32 from 2023-Q3 through 2026-Q1, then double from 2026-Q2, for both mobile
+  and fixed. Other columns were stable. See [the type table](source-schema.md).
+- **Why the fix was missed:** an existing `SUCCESS` watermark in DEV matched
+  the raw ETag, so normal builds skipped the affected file and hid the read-path
+  regression. A green no-op build did not exercise the new reader.
+- **Fix:** load each selected file independently with Parquet autodetection,
+  then cast every numeric column into the curated schema. Sync uses an explicit
+  allowed-types footer contract, not the curated BigQuery schema.
+  A SQL CAST cannot rescue a wildcard reader that fails before evaluating SQL.
+- **Regression check:** changes to readers, schemas or SQL need a forced rebuild
+  across both eras and both network types, followed by a full raw rebuild if
+  curated data was replaced. ETags fingerprint source bytes, not application
+  behavior. Unit tests cover both physical eras and reject string latency;
+  live verification is a separate manual check.
 
 These are code-review lessons and deployment checks, not evidence of a
 successful live rollout.

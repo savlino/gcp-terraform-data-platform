@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from unittest.mock import MagicMock
+from unittest.mock import call as mock_call
 
 import pytest
 from google.api_core.exceptions import Conflict
@@ -101,11 +102,24 @@ def test_staging_expiry_quality_before_publish_and_billing(build_setup):
     now = datetime.now(UTC)
     result = publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
     assert result.rows == 10
-    table = bq.create_table.call_args.args[0]
+    table = bq.create_table.call_args_list[0].args[0]
     assert table.table_id == "stg_ookla_tiles_mobile_2023q3"
     assert now + timedelta(hours=23) < table.expires < now + timedelta(hours=25)
     calls = bq.query.call_args_list
-    assert "FROM `dep-2610-dev.network_perf.ext_ookla_raw`" in calls[0].args[0]
+    raw_table = bq.create_table.call_args_list[1].args[0]
+    assert raw_table.table_id == "stg_raw_mobile_2023q3"
+    assert raw_table.expires == table.expires
+    assert raw_table.labels == table.labels
+    assert not raw_table.schema
+    load = bq.load_table_from_uri.call_args
+    assert load.args == (part.uri, f"dep-2610-dev.network_perf.{part.raw_stage_name}")
+    assert load.kwargs["location"] == settings.location
+    assert load.kwargs["job_config"].autodetect is True
+    assert load.kwargs["job_config"].source_format == "PARQUET"
+    assert load.kwargs["job_config"].write_disposition == "WRITE_TRUNCATE"
+    assert load.kwargs["job_config"].create_disposition == "CREATE_NEVER"
+    assert "FROM `dep-2610-dev.network_perf.stg_raw_mobile_2023q3`" in calls[0].args[0]
+    assert "FROM `dep-2610-dev.network_perf.stg_raw_mobile_2023q3`" in calls[1].args[0]
     assert "invalid_devices" in calls[1].args[0]
     assert "BEGIN TRANSACTION" in calls[2].args[0]
     for call in calls:
@@ -115,7 +129,10 @@ def test_staging_expiry_quality_before_publish_and_billing(build_setup):
     assert stage_job.write_disposition == "WRITE_TRUNCATE"
     assert stage_job.destination.table_id == part.stage_name
     assert calls[2].kwargs["job_config"].destination is None
-    bq.delete_table.assert_called_once()
+    assert bq.delete_table.call_args_list == [
+        mock_call(f"dep-2610-dev.network_perf.{part.raw_stage_name}", not_found_ok=True),
+        mock_call(f"dep-2610-dev.network_perf.{part.stage_name}", not_found_ok=True),
+    ]
 
 
 def test_bad_devices_stops_before_curated_or_load_log_mutation(build_setup):
@@ -125,7 +142,7 @@ def test_bad_devices_stops_before_curated_or_load_log_mutation(build_setup):
         publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
     assert len(bq.query.call_args_list) == 2
     assert all("DELETE FROM" not in call.args[0] for call in bq.query.call_args_list)
-    bq.delete_table.assert_called_once()
+    assert bq.delete_table.call_count == 2
 
 
 def test_environment_byte_limit_applies_to_every_build_query(build_setup, monkeypatch):
@@ -171,7 +188,35 @@ def test_failed_publish_is_surfaced_and_stage_cleaned(build_setup):
     bq.query.side_effect = fail_publish
     with pytest.raises(RuntimeError, match="Transaction failed"):
         publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
-    bq.delete_table.assert_called_once()
+    assert bq.delete_table.call_count == 2
+
+
+def test_failed_raw_load_cleans_stages_without_querying_or_publishing(build_setup):
+    config, settings, part, gcs, bq = build_setup
+    bq.load_table_from_uri.return_value.result.side_effect = RuntimeError("Load failed")
+    with pytest.raises(RuntimeError, match="Load failed"):
+        publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
+    bq.query.assert_not_called()
+    assert bq.delete_table.call_count == 2
+
+
+def test_existing_raw_stage_is_not_deleted_or_truncated(build_setup):
+    config, settings, part, gcs, bq = build_setup
+    bq.create_table.side_effect = [None, Conflict("Already exists")]
+    with pytest.raises(Conflict):
+        publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
+    bq.load_table_from_uri.assert_not_called()
+    bq.delete_table.assert_called_once_with(
+        f"dep-2610-dev.network_perf.{part.stage_name}", not_found_ok=True
+    )
+
+
+def test_raw_load_finishes_before_transform_and_quality(build_setup):
+    config, settings, part, gcs, bq = build_setup
+    responses(bq)
+    publish_partition(gcs, bq, config, settings, "dep-2610-dev.network_perf", part)
+    names = [entry[0] for entry in bq.mock_calls]
+    assert names.index("load_table_from_uri().result") < names.index("query")
 
 
 @pytest.mark.parametrize("force,expected", [(False, 0), (True, 1)])
@@ -240,6 +285,7 @@ def test_dry_run_reads_watermarks_only(build_setup):
     responses(bq)
     build(gcs, bq, config, settings, "mobile", (2023, 3), True, True)
     bq.create_table.assert_not_called()
+    bq.load_table_from_uri.assert_not_called()
     bq.delete_table.assert_not_called()
     bq.query.assert_called_once()
     assert "QUALIFY" in bq.query.call_args.args[0]
@@ -348,10 +394,10 @@ def test_sql_transaction_and_filter_contracts():
         < publish.index("COMMIT TRANSACTION")
     )
     assert publish.startswith("BEGIN TRANSACTION;")
-    stage = sql("stage", "project.dataset")
-    assert "type = @network_type AND year = @year AND quarter = @quarter" in stage
+    stage = sql("stage", "project.dataset", raw_stage="project.dataset.raw_stage")
+    assert "FROM `project.dataset.raw_stage`" in stage
     assert "tile_x BETWEEN @min_lon AND @max_lon" in stage
-    assert "_FILE_NAME = @source_uri" in stage
+    assert "_FILE_NAME" not in stage
     assert "{16}" in sql("quality", "project.dataset", "stage")
     watermarks = sql("watermarks", "project.dataset")
     assert "WHERE status = 'SUCCESS'" in watermarks

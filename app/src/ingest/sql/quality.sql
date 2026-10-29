@@ -33,7 +33,5 @@ SELECT
   (SELECT COUNT(*) FROM `{dataset}.ookla_tiles`
    WHERE quarter_start = DATE_SUB(@quarter_start, INTERVAL 3 MONTH)
      AND network_type = @network_type) AS previous_rows,
-  (SELECT COUNT(*) FROM `{dataset}.ext_ookla_raw`
-   WHERE type = @network_type AND year = @year AND quarter = @quarter
-     AND _FILE_NAME = @source_uri) AS source_rows
+  (SELECT COUNT(*) FROM `{raw_stage}`) AS source_rows
 FROM flagged

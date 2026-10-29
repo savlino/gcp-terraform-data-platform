@@ -39,7 +39,7 @@ foreach ($plan in $plans) {
     }
     $expectedProtection = $plan.'@testrun' -eq 'prod_paused_by_default'
     $tables = @($changes | Where-Object { $_.type -eq 'google_bigquery_table' })
-    if ($tables.Count -eq 0 -or $job.deletion_protection -ne $expectedProtection -or
+    if ($tables.Count -ne 3 -or $job.deletion_protection -ne $expectedProtection -or
         @($tables | Where-Object { $_.change.after.deletion_protection -ne $expectedProtection }).Count -ne 0) {
         throw 'The job and BigQuery tables must share the root deletion protection flag.'
     }
@@ -71,7 +71,7 @@ foreach ($plan in $plans) {
         MINIMUM_ROW_PERCENT  = '65'
         LATENCY_CEILING_MS   = '9000'
         SCHEMAS_DIR          = '/app/schemas'
-        SOURCE_SCHEMA_PATH   = '/app/schemas/ookla_raw.json'
+        SOURCE_SCHEMA_PATH   = '/app/schemas/source_contract.json'
         NATIVE_SCHEMA_PATH   = '/app/schemas/ookla_tiles.json'
     }
     if ($envMap.Count -ne $expectedEnv.Count + 1) {

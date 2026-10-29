@@ -28,7 +28,7 @@ state.py: compare with GCS source_etag/source_size metadata
     v
 schema_check.py: anonymous Arrow S3 trailer/footer range reads
     |
-    | validate against schemas/ookla_raw.json before upload
+    | validate against schemas/source_contract.json before upload
     v
 transfer.py: streamed HTTPS GET -> GCS resumable upload
     |
@@ -66,7 +66,7 @@ credentials are passed explicitly to the GCS client. No service-account keys or
 source credentials are required.
 
 Terraform passes one region variable to the raw bucket and `network_perf`
-dataset, keeping their configured locations aligned for future external queries.
+dataset, keeping their configured locations aligned for per-file load jobs.
 The runtime has bucket-scoped Object User, dataset-scoped Data Editor,
 project-scoped Job User and access to the configured alert secret only.
 The sync command currently uses only storage access; it does not read the secret.
@@ -98,16 +98,34 @@ this job only, an OAuth access token and the v2 Jobs `:run` endpoint.
 
 ## Curated build pipeline
 
-Terraform defines `ext_ookla_raw` with a pinned shared schema
-([schemas/ookla_raw.json](../schemas/ookla_raw.json)), typed CUSTOM Hive
-partitions and a required Hive partition filter. This avoids autodetect drift
-across source quarters; live creation and queries remain unverified.
-The sync application does not create or query the external table.
+The [source footer scan](source-schema.md) found INT32 latency-under-load
+columns through 2026-Q1 and DOUBLE from 2026-Q2, for both network types.
+SQL casts cannot repair a wildcard external reader that fails before SQL
+evaluation. The shared `ext_ookla_raw` resource and its schema-ignore
+workaround have been removed, not retained as a fallback.
+
+Sync validates every selected footer against
+[source_contract.json](../schemas/source_contract.json) before transfer.
+Build uses a BigQuery Parquet **load job for each individual GCS object**,
+with `autodetect = true` and `WRITE_TRUNCATE`, into
+`stg_raw_<type>_<yyyy>q<q>`. Detection is based on the actual file, never
+the quarter name. The raw stage is reserved with a one-day expiration before
+loading; no global file or row buffers are held in Python. Load jobs read
+the full global file and incur temporary native storage; bbox filtering
+reduces curated data, not raw load volume.
 
 The separate `build` command compares GCS `source_etag` metadata with the latest
 successful load-log row, with optional type/quarter selection and forced rebuild.
-A parameterized query filters the external Hive partition, file URI and bbox
-into a one-day staging table. Quality checks run before any curated mutation.
+A parameterized `stage.sql` query reads only that raw stage, filters the bbox
+and explicitly casts every numeric source column to the curated type.
+All three latency columns are FLOAT64 in `ookla_tiles`. The query writes
+`stg_ookla_tiles_<type>_<yyyy>q<q>`, also with a one-day expiration. Both
+owned stages are deleted on success or failure; expiry is the fallback
+after process termination. Existing stage names fail rather than overwriting
+another run. Every query job, including DQ source-row counts, watermarks and
+transactions, has `maximum_bytes_billed`; load jobs are not query jobs.
+Quality checks run before any curated mutation and count source rows from
+the per-file raw stage, not a wildcard external table.
 A transaction replaces only that type/quarter in `ookla_tiles` and updates its
 watermark; it never truncates a shared quarter partition.
 
@@ -120,6 +138,10 @@ Build dry-run reads watermarks but performs no data writes or notifications.
 See [build behavior and recovery](../app/BUILD.md) for thresholds, transaction
 boundaries and single-writer limitations. This path has local test coverage,
 not verified live BigQuery execution.
+
+Watermarks fingerprint source ETags, not the read implementation. After this
+change, force a rebuild across **both** physical-type eras and network types;
+an unchanged `SUCCESS` watermark otherwise skips the regression check.
 
 ## Application container
 

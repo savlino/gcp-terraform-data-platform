@@ -25,14 +25,16 @@ def no_cloud_or_http(monkeypatch):
 
 @pytest.fixture
 def schema_path():
-    return ROOT / "schemas" / "ookla_raw.json"
+    return ROOT / "schemas" / "source_contract.json"
 
 
 @pytest.fixture
 def source_schema(schema_path):
-    mapping = {"STRING": pa.string(), "FLOAT": pa.float64(), "INTEGER": pa.int64()}
+    mapping = {
+        "string": pa.string(), "double": pa.float64(), "int64": pa.int64(), "int32": pa.int32()
+    }
     fields = json.loads(schema_path.read_text())
-    return pa.schema([(field["name"], mapping[field["type"]]) for field in fields])
+    return pa.schema([(field["name"], mapping[field["types"][0]]) for field in fields])
 
 
 @pytest.fixture

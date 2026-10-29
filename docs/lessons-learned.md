@@ -89,6 +89,16 @@ data provider's documentation and shaped the design.
   `-parallelism=2` reduces concurrent requests on a weak connection.
 - **Takeaway:** state can diverge from reality; `state push` and `import` are the recovery tools.
 
+### Never plan one environment against another environment's state
+- **What happened:** a TEST plan was created while the local Terraform data directory still selected
+  the DEV backend. Terraform planned DEV resources for replacement using TEST configuration; applying
+  it removed DEV resources and then failed with 409 "already exists" when creating resources in TEST.
+- **Fix:** use a dedicated `TF_DATA_DIR` and explicit `-reconfigure -backend-config` for every
+  environment. Inspect `terraform state list` and the saved plan before applying; use the CI plan/apply
+  jobs rather than an old or locally generated plan.
+- **Takeaway:** a plan that proposes creating or replacing many existing resources is a stop signal.
+  Confirm its backend and state before any apply.
+
 ### Plan files are binary
 - Read them with `terraform show dev.tfplan` (or `-json`). They may contain variable values, so they
   are deleted after apply and ignored by git.
@@ -151,7 +161,8 @@ data provider's documentation and shaped the design.
   would drop and recreate the table.
 - **Fix:** `ignore_auto_generated_schema = true` on the table (present in provider 8.7.0, checked with
   `terraform providers schema -json`), asserted in `infra/tests/bigquery.tftest.hcl`.
-  The INTEGER → FLOAT latency change is real and still replaces the table once.
+  The INTEGER → FLOAT latency change is real, but a Terraform replacement can be
+  avoided by applying BigQuery's supported in-place type conversion before replanning.
 - **Status:** a clean second plan after the live apply is still to be confirmed.
 - **Takeaway:** a pinned schema on a Hive-partitioned table describes the files, not the table;
   server-added columns need an explicit ignore.
@@ -213,7 +224,27 @@ data provider's documentation and shaped the design.
   creates. A green policy run proves only that the plan is safe *as computed*; also check
   `terraform state list` and the backend the plan was made with.
 
+### Never leave the P10 destroy bypass in shared CI
+- **What happened:** `--allow-destroy` was added to the shared policy command, disabling P10 for every
+  environment and every pipeline rather than authorizing one reviewed migration.
+- **Fix:** keep the default CI command fail-closed. If P10 must be bypassed for a reviewed plan, use
+  the documented one-run procedure and review every environment plan affected by that override.
+- **Takeaway:** an unconditional bypass turns a deliberate migration guard into no guard.
+
 ## Multi-environment rollout precautions
+
+### A Terraform schema replacement is not always required by BigQuery
+- **What happened:** PROD apply refused to replace `ookla_tiles` because its
+  Terraform state had `deletion_protection = true`. Allowing destruction in P10
+  does not override the provider's protection.
+- **Safer migration:** BigQuery documents `INT64` to `FLOAT64` as a supported
+  `ALTER COLUMN SET DATA TYPE` conversion. Apply that specific change manually
+  with writers paused, keep protection enabled, then generate a fresh normal
+  Terraform plan. Do not reuse the saved replacement plan.
+- **Takeaway:** inspect the database's native migration support before removing
+  protection or accepting data loss. Documentation confirms support; a clean
+  live plan and application checks must still verify this rollout.
+- **Docs:** https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#alter_column_set_data_type_statement
 
 ### Source physical types changed in 2026-Q2
 - **Evidence:** the footer scan found `avg_lat_down_ms` and `avg_lat_up_ms` as

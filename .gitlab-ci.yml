@@ -142,7 +142,7 @@ python:lint-test:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
     - 'test -f infra/${CI_ENV}.plan.json || { echo "${CI_ENV}.plan.json is missing: plan:${CI_ENV} did not produce it"; exit 1; }'
-    - python scripts/check_plan.py infra/${CI_ENV}.plan.json --env ${CI_ENV} --junit policy-${CI_ENV}.xml --allow-destroy
+    - python scripts/check_plan.py infra/${CI_ENV}.plan.json --env ${CI_ENV} --junit policy-${CI_ENV}.xml
   artifacts:
     when: always
     access: maintainer

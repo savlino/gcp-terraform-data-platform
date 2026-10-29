@@ -200,8 +200,11 @@ the table was applied with `deletion_protection = true`, and Terraform refuses
 to destroy a protected table even when the resource is deleted from
 configuration in the same apply. The leftover table is deleted by hand after
 apply (step 4). `ookla_tiles.avg_lat_ms` changes from INTEGER to FLOAT
-(FLOAT64); **Terraform may replace the native table**, losing its curated data.
-The down/up fields were already FLOAT. Raw objects are not deleted by this
+(FLOAT64). Terraform may plan a replacement, but BigQuery supports this
+specific conversion in place with `ALTER COLUMN SET DATA TYPE`; prefer that
+manual migration before generating a fresh Terraform plan. It preserves the
+table and its data without disabling Terraform deletion protection. The
+down/up fields were already FLOAT. Raw objects are not deleted by this
 migration.
 
 1. Pause the environment's Scheduler and stop other writers. Confirm all raw
@@ -214,11 +217,11 @@ migration.
    `ookla_tiles` replacement. No dataset, bucket, secret or mart deletion is
    intended. Do not first disable `deletion_protection` on the external table:
    the `removed` block makes that preparatory apply unnecessary. If the plan
-   shows `ookla_tiles` being replaced while it has `deletion_protection = true`
-   (PROD), disable protection **only on that table** in a separately reviewed
-   preparatory apply while its resource still exists; removing protected
-   resources from configuration alone does not unlock deletion. Restore
-   protection after migration.
+   shows `ookla_tiles` being replaced, use the in-place conversion below first.
+   Keep PROD `deletion_protection = true`: the variable also protects the other
+   native tables and the Cloud Run Job. Do not retry an old saved plan after
+   changing the live schema. A fresh normal plan refreshes state and must no
+   longer propose this schema replacement; stop if it still does.
 3. P10 blocks only delete/replacement of stateful resources. The forgotten
    external table does not trigger it. If the plan still contains a reviewed
    `ookla_tiles` replacement, use `--allow-destroy` for that plan only, or a
@@ -243,6 +246,41 @@ migration.
    after review. Once all three environments have applied the `removed` block,
    it may be deleted from `registry_migration.tf` in a later change.
 
+**In-place latency conversion (BigQuery SQL workspace, PROD example).**
+Use an authorized operator identity; this procedure does not grant new access.
+Keep Scheduler paused and ensure no ingestion execution is running. Set the
+query processing location to `europe-southwest1` and maximum bytes billed to
+`10737418240` for each query job. Inspect the live column first:
+
+```sql
+SELECT column_name, data_type, is_nullable
+FROM `dep-2610-prod.network_perf.INFORMATION_SCHEMA.COLUMNS`
+WHERE table_name = 'ookla_tiles' AND column_name = 'avg_lat_ms';
+```
+
+Expect exactly one nullable `INT64` column before conversion. If it is already
+`FLOAT64`, skip the ALTER. Stop on any other result. For `INT64`, execute:
+
+```sql
+ALTER TABLE `dep-2610-prod.network_perf.ookla_tiles`
+ALTER COLUMN avg_lat_ms SET DATA TYPE FLOAT64;
+```
+
+Repeat the metadata query and expect `FLOAT64`. This widening conversion uses
+approximate floating-point representation; it does not recover fractional
+values absent from older integer data. Forced application regression checks
+are still required. See the supported conversions in the
+[BigQuery DDL reference](https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#alter_column_set_data_type_statement).
+
+Start a new main pipeline without a destroy override and inspect every plan:
+`ookla_tiles` must have no delete/create actions and PROD protection must remain
+true. A previous failed apply may have committed other changes; review the new
+plan rather than assuming it contains the original actions. Promote DEV, TEST,
+then PROD using the new pipeline's saved plans. After a successful PROD apply,
+check whether `ext_ookla_raw` remains in the live dataset and delete it only
+after confirming it is no longer in that environment's Terraform state.
+The forget operation may already have completed during the failed apply.
+
 **PowerShell, after the apply of each environment.** The table holds only
 metadata; the raw objects in the bucket are not touched. Run it only after the
 saved plan was applied, otherwise Terraform will see an unexpected deletion:
@@ -266,7 +304,11 @@ if ($LASTEXITCODE -eq 0) { throw 'Table still exists.' }
 
 ```powershell
 $envName = 'dev'
+$env:TF_DATA_DIR = Join-Path (Resolve-Path .\infra).Path ".terraform-$envName"
 terraform -chdir=infra init -reconfigure -lockfile=readonly "-backend-config=env\$envName.gcs.tfbackend"
+if ($LASTEXITCODE -ne 0) { throw 'Backend initialization failed.' }
+terraform -chdir=infra state list
+if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect environment state.' }
 terraform -chdir=infra plan "-var-file=env\$envName.tfvars" "-out=$envName.tfplan"
 if ($LASTEXITCODE -ne 0) { throw 'Migration plan failed.' }
 terraform -chdir=infra show -json "$envName.tfplan" > "infra\$envName.plan.json"

@@ -33,7 +33,7 @@ def notify(credentials: Credentials, project: str, text: str) -> None:
         with requests.Session() as session:
             result = session.post(
                 f"https://api.telegram.org/bot{token}/sendMessage",
-                json={"chat_id": chat_id, "text": text[:4000]},
+                json={"chat_id": chat_id, "text": f"[project={project}]\n{text}"[:4000]},
                 timeout=(10, 30),
                 allow_redirects=False,
             )

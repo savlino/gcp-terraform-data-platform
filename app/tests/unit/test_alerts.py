@@ -37,8 +37,27 @@ def test_telegram_success(telegram):
     assert client.access_secret_version.call_args.kwargs["request"]["name"].endswith(
         "/secrets/alert-telegram/versions/latest"
     )
-    assert session.post.call_args.kwargs["json"] == {"chat_id": "123", "text": "DQ=PASS rows=10"}
+    assert session.post.call_args.kwargs["json"] == {
+        "chat_id": "123",
+        "text": "[project=dep-2610-dev]\nDQ=PASS rows=10",
+    }
     assert session.post.call_args.kwargs["allow_redirects"] is False
+
+
+@pytest.mark.parametrize("env", ["dev", "test", "prod"])
+@pytest.mark.parametrize("text", ["Build DQ=PASS; rows=10", "Build FAILED; rule=mart_rebuild"])
+def test_notification_identifies_project_for_success_and_failure(telegram, env, text):
+    _, session, _ = telegram
+    alerts.notify(MagicMock(), f"dep-2610-{env}", text)
+    assert session.post.call_args.kwargs["json"]["text"] == f"[project=dep-2610-{env}]\n{text}"
+
+
+def test_long_notification_keeps_project_within_length_limit(telegram):
+    _, session, _ = telegram
+    alerts.notify(MagicMock(), "dep-2610-prod", "x" * 5000)
+    text = session.post.call_args.kwargs["json"]["text"]
+    assert text.startswith("[project=dep-2610-prod]\n")
+    assert len(text) == 4000
 
 
 @pytest.mark.parametrize("secret", ["custom-alert", "projects/dep-2610-dev/secrets/custom-alert"])

@@ -141,6 +141,8 @@ Matching ETag/SUCCESS watermarks otherwise skip the new read path.
 ## Telegram
 
 Secret `alert-telegram` must contain JSON with `bot_token` and `chat_id`.
+Every success or failure notification starts with `[project=<PROJECT_ID>]`,
+identifying the environment by its GCP project (for example `dep-2610-prod`).
 After success, send rows, DQ status, loaded quarters and build duration in seconds
 (monotonic clock) through Bot API `sendMessage`. WARN totals cover only partitions
 loaded in this run: outlier rows, null-down rows and their weighted-by-row null

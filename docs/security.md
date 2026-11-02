@@ -32,35 +32,77 @@ Do not weaken the environment rules to make a bootstrap plan pass.
 | P7 | No `0.0.0.0/0` in `source_ranges` for a non-empty ingress `allow`; omitted direction means INGRESS. Deny-only rules are allowed. | Firewalls with non-null `after` |
 | P8 | Every `network_interface` has empty `access_config`. | Instances with non-null `after` |
 | P9 | If `labels` is present, require `project`, `env`, `managed_by` keys and `labels.env == --env`; ignore `effective_labels` and `terraform_labels`. | Non-null `after` containing labels |
-| P10 | No delete/replace of bucket, dataset, table, secret container or Artifact Registry repository without intentional override. | Actions containing `delete`, including delete/create replacements |
+| P10 | No delete/replace of bucket, dataset, table, secret container or Artifact Registry repository without intentional override. Every `--allow-destroy-file` entry must allow at least one P10 or P13 finding; stale and duplicate entries fail. | Actions containing `delete`, including delete/create replacements; allow-file entries |
 | P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. | Non-null `after`, PROD only |
+| P12 | The project of every managed change equals `--project-id` (`dep-2610-<env>`), resolved in a fixed order (see below); a project change between `before` and `after` (including a replacement) fails. Unresolvable types fail. | Before and after, including deletes and replacements |
+| P13 | On the P10 types, `deletion_protection` `true` -> `false` or `force_destroy` `false` -> `true` fails unless the address is listed in `--allow-destroy-file`. `--allow-destroy`/`ALLOW_DESTROY` do not disable it. | P10 types with non-null `before` and `after` |
 
 P4-P9 and P11 ignore deletes (`after == null`); P10 inspects delete actions.
+`--allow-destroy-file PATH` lists resource addresses (one per line; blank lines
+and `#` comments ignored); only those addresses are exempt from P10 and P13. A
+missing file is an input error (exit 2); without `--allow-destroy-file` nothing
+is allowed per address and no stale check runs. After all rules run, every
+listed address must have been used to allow a stateful delete/replace (P10) or
+a protection relaxation (P13); otherwise
+`FAIL [P10] <address>: stale allow-destroy entry; remove it from <file>`. This
+catches typos and entries left over from an earlier migration. An address
+listed twice fails as a duplicate. P13 stops an environment-wide
+protection flip from being used to delete a single resource; see the
+[runbook](runbook.md#protection-is-relaxed-per-resource-never-per-environment).
+P12 inspects `before` and `after`: it is the guard against planning one
+environment's configuration on another environment's state (see the
+[2026-10-29 incident](incidents/2026-10-29-cross-env-plan.md)). It has no
+override: `--allow-destroy` does not disable it. The project of each change is
+resolved in this order:
+
+1. **Attribute**: `project` in `before` or `after`.
+2. **Derived**: parsed from an identifying attribute, e.g.
+   `google_service_account_iam_member.service_account_id`
+   (`projects/<p>/serviceAccounts/...`).
+3. **Naming convention**: `google_storage_bucket_iam_member.bucket` must start
+   with `<project_id>-` (buckets are named `<project_id>-<purpose>`; the state
+   form `b/<name>` is accepted). This relies on the naming rule, not on an API
+   fact.
+4. **Exempt**: types that belong to no project and cannot move between projects
+   print `SKIP [P12] <address>: exempt (<reason>)`. Today only
+   `google_billing_budget` (scoped to a billing account).
+
+Any other managed type without `project` fails with
+`cannot determine project for <type>; add a derivation or an explicit exemption`,
+so a new resource type cannot silently bypass P12. The tables list only types
+present in our plans: `google_storage_bucket_iam_member` in `infra`, plus
+`google_service_account_iam_member` and `google_billing_budget` in `bootstrap`
+(whose plans are not policy-checked today). A project, derived or convention
+value that is unknown until apply emits a SKIP.
 Unknown required fields in `after_unknown`, including nested values, and missing
 computed fields emit `SKIP [Pn] address: ... unknown until apply`. A known
 violation is still reported when another value is unknown. Missing mandatory
 label keys are violations, not computed attributes. A skip is not proof of
 compliance; review it before apply and verify effective permissions separately.
 
-**PowerShell on Windows**, from the repository root, after generating a complete
-saved DEV plan:
+For local `infra` plan/apply, use the guarded script from the repository root;
+it generates the plan JSON and runs this checker with the matching environment
+project:
 
 ```powershell
-terraform -chdir=infra show -json dev.tfplan > plan.json
-if ($LASTEXITCODE -ne 0) { throw 'Cannot export plan JSON' }
-python .\scripts\check_plan.py .\plan.json --env dev --junit policy-dev.xml
+.\scripts\tf.ps1 -Env dev -Action plan
 ```
+
+`--project-id` is required when invoking the checker directly. See the
+[local Terraform procedure](runbook.md#local-terraform-only-through-scriptstfps1).
 
 Exit codes: `0` no violations (possibly skips), `1` policy violations, `2`
 input/usage/report-write errors. Output lists findings and a checked/violated/
 skipped summary. For deliberate destructive work only, `--allow-destroy` or
-`ALLOW_DESTROY=true` disables **P10 only**. Do not enable this globally in CI.
+`ALLOW_DESTROY=true` disables **P10 only** (all addresses; not P12 or P13). Do
+not enable this globally in CI. Prefer `--allow-destroy-file`, which exempts
+only the listed addresses; `scripts/tf.ps1` uses only the file.
 P1/P2/P3 continue rejecting forbidden resources even during destruction.
 
-JUnit contains one testcase for each P0-P11. Failures name every violating
+JUnit contains one testcase for each P0-P13. Failures name every violating
 address. A rule with skips and no failures is skipped; when both occur, failure
 takes precedence and skipped details remain in `system-out`.
-`policy:dev` consumes the full DEV plan artifact, passes `--env dev`, and publishes
+`policy:dev` consumes the full DEV plan artifact, passes `--env dev --project-id dep-2610-dev`, and publishes
 the restricted one-day JUnit report even on policy failure. Its rules match the
 plan job so fork MRs cannot depend on a missing cloud plan. `python:lint-test`
 runs the app unit suite, synthetic policy tests and Ruff in Python 3.12.
@@ -75,6 +117,8 @@ state and must not be committed. Local synthetic checks do not verify a live MR.
 | Same runtime | `roles/bigquery.dataEditor` | Environment `network_perf` dataset only | Populate native tables, maintain the load log and later create the external table. Does not grant project-level dataset creation. |
 | Same runtime | `roles/bigquery.jobUser` | Environment project | Submit query jobs (`bigquery.jobs.create`); jobs belong to projects, so this cannot be a dataset grant. Data access remains separately scoped. |
 | Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
+| `ci-sqltest-dev` (ops project) | `roles/bigquery.dataEditor` | DEV `sql_tests` dataset only; granted by **infra** (`sql_test_principal`) | Write disposable SQL integration fixtures; the dataset is enabled only in DEV and tables expire after one hour. No access to `network_perf`, buckets or secrets. |
+| Same SQL test CI identity | `roles/bigquery.jobUser` | DEV project; granted by **bootstrap** | Submit BigQuery jobs; this is its only project-level role. WIF trusts only the configured GitLab `project_path`. |
 | Bootstrap `developer_principal` | `roles/iam.serviceAccountTokenCreator` | DEV and TEST projects only | Optional human local impersonation; broad across all SAs in those projects, not ops CI accounts. Absent by default and never granted in PROD. |
 | `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
 | Same bootstrap human | `roles/iap.tunnelResourceAccessor` | DEV and TEST projects only, independent of VM flag | Deliberate tunnel authorization, even if inherited Owner access already exists. No explicit OS Login grant is managed by this repo. |
@@ -158,6 +202,32 @@ pool dedicated to this project: another provider in the same pool could widen
 trust. A protected ref is not necessarily `main`; review protected branch **and
 tag** rules. These grants do not give the plan account permission to
 impersonate the apply account.
+
+The optional SQL-test identity is separately named `ci-sqltest-dev`. The
+grants are split by apply order, because bootstrap is applied before infra and
+cannot grant on a dataset that does not exist yet:
+
+- **bootstrap** (`enable_sql_test_access = true`, default `false`): the
+  service account in ops, its WIF trust for the configured project path, and
+  project-level `roles/bigquery.jobUser` on DEV.
+- **infra** (DEV only): the `sql_tests` dataset and
+  `roles/bigquery.dataEditor` on that dataset for the email in
+  `sql_test_principal`. A validation requires `sql_test_principal` exactly when
+  `enable_sql_test_dataset` is true, so TEST/PROD cannot carry the grant, and
+  accepts only a service-account email.
+
+Order: apply bootstrap with the flag first, then DEV infra; an infra apply
+that grants a not-yet-existing account fails. The identity receives no
+state-bucket, raw-bucket, `network_perf` or Secret Manager grant. To remove
+it, disable the dataset in infra first (which removes the dataset grant), then
+the bootstrap flag.
+
+The `sql_tests` dataset exists only when `enable_sql_test_dataset = true`
+(true in DEV tfvars; false in TEST/PROD). It has standard environment labels
+and a one-hour default table expiration. BigQuery datasets do not expose the
+table-level `deletion_protection` setting; this disposable dataset sets
+`delete_contents_on_destroy = true` so Terraform may remove test tables with
+the dataset. Do not store production or user data there.
 
 All roles below are on the corresponding **environment project**, not ops.
 This deliberate deployment-identity exception avoids basic Owner/Editor/Viewer

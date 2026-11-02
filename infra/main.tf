@@ -27,6 +27,8 @@ module "bigquery" {
   location                   = var.region
   deletion_protection        = var.deletion_protection
   delete_contents_on_destroy = var.delete_contents_on_destroy
+  enable_sql_test_dataset    = var.enable_sql_test_dataset
+  sql_test_principal         = var.sql_test_principal
 }
 
 module "iam" {

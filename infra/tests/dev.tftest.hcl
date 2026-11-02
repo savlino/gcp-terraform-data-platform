@@ -29,25 +29,67 @@ run "dev_plan" {
   }
 }
 
+run "dev_sql_test_dataset_enabled" {
+  command = plan
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  assert {
+    condition     = output.sql_test_dataset_id == "sql_tests"
+    error_message = "The DEV SQL test dataset must be created when its flag is true."
+  }
+}
+
+run "reject_sql_test_dataset_outside_dev" {
+  command = plan
+  variables {
+    env                     = "test"
+    enable_sql_test_dataset = true
+    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.enable_sql_test_dataset]
+}
+
+run "reject_sql_test_dataset_without_principal" {
+  command = plan
+  variables {
+    enable_sql_test_dataset = true
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
+run "reject_sql_test_principal_without_dataset" {
+  command = plan
+  variables {
+    env                     = "test"
+    enable_sql_test_dataset = false
+    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
 run "test_subnet_default" {
   command = plan
   variables {
-    env = "test"
+    env                     = "test"
+    enable_sql_test_dataset = false
   }
   assert {
-    condition     = output.subnet_cidr == "10.20.0.0/24" && output.iap_demo_vm_name == null
-    error_message = "TEST must default to its own CIDR with no VM."
+    condition     = output.subnet_cidr == "10.20.0.0/24" && output.iap_demo_vm_name == null && output.sql_test_dataset_id == null
+    error_message = "TEST must default to its own CIDR with no VM or SQL test dataset."
   }
 }
 
 run "prod_subnet_default" {
   command = plan
   variables {
-    env = "prod"
+    env                     = "prod"
+    enable_sql_test_dataset = false
   }
   assert {
-    condition     = output.subnet_cidr == "10.30.0.0/24" && output.iap_demo_vm_name == null
-    error_message = "PROD must default to its own CIDR with no VM."
+    condition     = output.subnet_cidr == "10.30.0.0/24" && output.iap_demo_vm_name == null && output.sql_test_dataset_id == null
+    error_message = "PROD must default to its own CIDR with no VM or SQL test dataset."
   }
 }
 

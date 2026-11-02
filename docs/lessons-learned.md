@@ -98,6 +98,7 @@ data provider's documentation and shaped the design.
   jobs rather than an old or locally generated plan.
 - **Takeaway:** a plan that proposes creating or replacing many existing resources is a stop signal.
   Confirm its backend and state before any apply.
+- **Review:** [2026-10-29 incident](incidents/2026-10-29-cross-env-plan.md).
 
 ### Plan files are binary
 - Read them with `terraform show dev.tfplan` (or `-json`). They may contain variable values, so they

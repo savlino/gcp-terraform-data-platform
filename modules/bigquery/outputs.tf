@@ -3,6 +3,11 @@ output "dataset_id" {
   value       = google_bigquery_dataset.network_perf.dataset_id
 }
 
+output "sql_test_dataset_id" {
+  description = "Disposable SQL test dataset ID; null when disabled."
+  value       = try(google_bigquery_dataset.sql_tests["sql_tests"].dataset_id, null)
+}
+
 output "table_ids" {
   description = "Native table IDs keyed by table name."
   value       = { for name, table in google_bigquery_table.native : name => table.table_id }

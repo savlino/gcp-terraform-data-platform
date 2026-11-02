@@ -34,6 +34,15 @@ override_resource {
   }
 }
 
+override_resource {
+  target          = google_service_account.ci_sqltest_dev["dev"]
+  override_during = plan
+  values = {
+    name  = "projects/dep-2610-ops/serviceAccounts/ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    email = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+}
+
 variables {
   billing_account_id  = "000000-000000-000000"
   gitlab_project_path = "savlino/gcp-terraform-data-platform"
@@ -66,6 +75,8 @@ run "dev_first_federation" {
     condition = (
       toset(keys(google_service_account.ci_plan)) == toset(["dev"]) &&
       toset(keys(google_service_account.ci_apply)) == toset(["dev"]) &&
+      length(google_service_account.ci_sqltest_dev) == 0 &&
+      length(google_project_iam_member.ci_sqltest_dev_job_user) == 0 &&
       google_service_account.ci_plan["dev"].project == var.ops_project_id &&
       google_service_account.ci_plan["dev"].account_id == "ci-plan-dev" &&
       google_service_account.ci_apply["dev"].account_id == "ci-apply-dev" &&
@@ -122,6 +133,61 @@ run "dev_first_federation" {
       ])
     )
     error_message = "Plan has only the documented metadata roles on DEV; apply uses predefined non-basic deployment roles."
+  }
+}
+
+run "dev_sql_test_identity_is_job_user_only" {
+  command = plan
+  variables {
+    enable_sql_test_access = true
+  }
+
+  assert {
+    condition = (
+      google_service_account.ci_sqltest_dev["dev"].project == var.ops_project_id &&
+      google_service_account.ci_sqltest_dev["dev"].account_id == "ci-sqltest-dev" &&
+      google_service_account_iam_member.sqltest_federation["dev"].service_account_id == google_service_account.ci_sqltest_dev["dev"].name &&
+      google_service_account_iam_member.sqltest_federation["dev"].role == "roles/iam.workloadIdentityUser" &&
+      google_service_account_iam_member.sqltest_federation["dev"].member == "principalSet://iam.googleapis.com/${local.wif_pool}/attribute.project_path/${var.gitlab_project_path}"
+    )
+    error_message = "The DEV SQL test account must be in ops and federate only the configured GitLab project path."
+  }
+
+  assert {
+    condition = (
+      google_project_iam_member.ci_sqltest_dev_job_user["dev"].project == var.dev_project_id &&
+      google_project_iam_member.ci_sqltest_dev_job_user["dev"].role == "roles/bigquery.jobUser" &&
+      google_project_iam_member.ci_sqltest_dev_job_user["dev"].member == "serviceAccount:${google_service_account.ci_sqltest_dev["dev"].email}"
+    )
+    error_message = "Bootstrap grants the SQL test account only BigQuery job submission in DEV; dataset access belongs to infra."
+  }
+
+  assert {
+    condition = (
+      length([
+        for grant in concat(
+          values(google_project_iam_member.ci_plan),
+          values(google_project_iam_member.ci_apply),
+          values(google_project_iam_member.developer),
+          values(google_project_iam_member.ci_sqltest_dev_job_user)
+        ) : grant.role if grant.member == "serviceAccount:${google_service_account.ci_sqltest_dev["dev"].email}"
+      ]) == 1 &&
+      toset([
+        for grant in concat(
+          values(google_project_iam_member.ci_plan),
+          values(google_project_iam_member.ci_apply),
+          values(google_project_iam_member.developer),
+          values(google_project_iam_member.ci_sqltest_dev_job_user)
+        ) : grant.role if grant.member == "serviceAccount:${google_service_account.ci_sqltest_dev["dev"].email}"
+      ]) == toset(["roles/bigquery.jobUser"]) &&
+      alltrue([
+        for grant in concat(
+          values(google_storage_bucket_iam_member.ci_plan_state),
+          values(google_storage_bucket_iam_member.ci_apply_state)
+        ) : grant.member != "serviceAccount:${google_service_account.ci_sqltest_dev["dev"].email}"
+      ])
+    )
+    error_message = "The SQL test account must have no other project-level role or bucket/repository grant."
   }
 }
 

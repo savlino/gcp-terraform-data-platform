@@ -36,6 +36,12 @@ variable "ci_environments" {
   }
 }
 
+variable "enable_sql_test_access" {
+  type        = bool
+  description = "Create the DEV SQL test CI identity, its WIF trust and DEV BigQuery Job User. Apply before DEV infra grants it sql_tests access."
+  default     = false
+}
+
 variable "developer_principal" {
   type        = string
   description = "Optional human user:/group: email principal granted project-level Token Creator and IAP tunnel access in DEV and TEST only."

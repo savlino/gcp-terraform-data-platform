@@ -141,8 +141,9 @@ python:lint-test:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   script:
-    - 'test -f infra/${CI_ENV}.plan.json || { echo "${CI_ENV}.plan.json is missing: plan:${CI_ENV} did not produce it"; exit 1; }'
-    - python scripts/check_plan.py infra/${CI_ENV}.plan.json --env ${CI_ENV} --junit policy-${CI_ENV}.xml
+    # ENV is set per policy job below (dev/test/prod); the project ID follows dep-2610-<env>.
+    - 'test -f infra/${ENV}.plan.json || { echo "${ENV}.plan.json is missing: plan:${ENV} did not produce it"; exit 1; }'
+    - python scripts/check_plan.py infra/${ENV}.plan.json --env ${ENV} --project-id dep-2610-${ENV} --junit policy-${ENV}.xml
   artifacts:
     when: always
     access: maintainer
@@ -190,21 +191,21 @@ plan:prod:
 
 policy:dev:
   extends: .policy
-  variables: {CI_ENV: "dev"}
+  variables: {ENV: "dev"}
   needs:
     - job: plan:dev
       artifacts: true
 
 policy:test:
   extends: .policy
-  variables: {CI_ENV: "test"}
+  variables: {ENV: "test"}
   needs:
     - job: plan:test
       artifacts: true
 
 policy:prod:
   extends: .policy
-  variables: {CI_ENV: "prod"}
+  variables: {ENV: "prod"}
   needs:
     - job: plan:prod
       artifacts: true

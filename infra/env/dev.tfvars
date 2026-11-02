@@ -1,12 +1,14 @@
-env                = "dev"
-project_id         = "dep-2610-dev"
-region             = "europe-southwest1"
-scheduler_region   = "europe-west1"
-subnet_cidr        = "10.10.0.0/24"
-demo_vm_zone       = "europe-southwest1-a"
-enable_iap_demo_vm = false
-image_tag          = "alerts-20261030-122040"
-image_digest       = "sha256:7b8ba04d8cf949274d14af6c6c0140710201181f6c7bbf74b28651a4d9bec2ec"
+env                     = "dev"
+project_id              = "dep-2610-dev"
+enable_sql_test_dataset = true
+sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+region                  = "europe-southwest1"
+scheduler_region        = "europe-west1"
+subnet_cidr             = "10.10.0.0/24"
+demo_vm_zone            = "europe-southwest1-a"
+enable_iap_demo_vm      = false
+image_tag               = "alerts-20261030-122040"
+image_digest            = "sha256:7b8ba04d8cf949274d14af6c6c0140710201181f6c7bbf74b28651a4d9bec2ec"
 
 # Enable only after the image_tag exists in the shared ops repository (image_repository default).
 enable_ingest_job = true

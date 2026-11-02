@@ -6,6 +6,7 @@ variables {
   location                   = "europe-southwest1"
   deletion_protection        = false
   delete_contents_on_destroy = true
+  enable_sql_test_dataset    = false
 }
 
 run "native_tables" {
@@ -71,6 +72,97 @@ run "native_tables" {
     })
     error_message = "Curated types must normalize all latency columns to FLOAT64."
   }
+}
+
+run "sql_test_dataset_enabled" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+
+  assert {
+    condition = (
+      toset(keys(google_bigquery_dataset.sql_tests)) == toset(["sql_tests"]) &&
+      google_bigquery_dataset.sql_tests["sql_tests"].project == "dep-2610-dev" &&
+      google_bigquery_dataset.sql_tests["sql_tests"].dataset_id == "sql_tests" &&
+      google_bigquery_dataset.sql_tests["sql_tests"].location == "europe-southwest1" &&
+      google_bigquery_dataset.sql_tests["sql_tests"].default_table_expiration_ms == 3600000 &&
+      google_bigquery_dataset.sql_tests["sql_tests"].delete_contents_on_destroy &&
+      google_bigquery_dataset.sql_tests["sql_tests"].labels == tomap({
+        project = "gcp-tf-portfolio", env = "dev", managed_by = "terraform"
+      })
+    )
+    error_message = "Enabled DEV SQL tests need an expiring, labelled, disposable dataset."
+  }
+
+  assert {
+    condition = (
+      toset(keys(google_bigquery_dataset_iam_member.sql_tests_data_editor)) == toset(["sql_tests"]) &&
+      google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].project == "dep-2610-dev" &&
+      google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].dataset_id == "sql_tests" &&
+      google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].role == "roles/bigquery.dataEditor" &&
+      google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].member == "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    )
+    error_message = "The SQL test account gets Data Editor on sql_tests only, never on network_perf."
+  }
+}
+
+run "sql_test_dataset_disabled" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    sql_test_principal = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+
+  assert {
+    condition     = length(google_bigquery_dataset.sql_tests) == 0 && length(google_bigquery_dataset_iam_member.sql_tests_data_editor) == 0
+    error_message = "Neither the SQL test dataset nor its grant may exist unless the feature flag is true."
+  }
+}
+
+run "sql_test_dataset_without_principal_has_no_grant" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    enable_sql_test_dataset = true
+  }
+
+  assert {
+    condition     = length(google_bigquery_dataset.sql_tests) == 1 && length(google_bigquery_dataset_iam_member.sql_tests_data_editor) == 0
+    error_message = "A null sql_test_principal must not create a grant."
+  }
+}
+
+run "reject_sql_test_member_prefix" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
+run "reject_sql_test_human_principal" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "someone@example.com"
+  }
+  expect_failures = [var.sql_test_principal]
 }
 
 run "protected_tables" {

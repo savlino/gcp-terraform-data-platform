@@ -20,6 +20,29 @@ resource "google_bigquery_dataset" "network_perf" {
   labels                     = local.labels
 }
 
+resource "google_bigquery_dataset" "sql_tests" {
+  for_each = var.enable_sql_test_dataset ? { sql_tests = true } : {}
+
+  project                     = var.project_id
+  dataset_id                  = "sql_tests"
+  friendly_name               = "${var.env}-sql-tests"
+  location                    = var.location
+  default_table_expiration_ms = 3600000
+  delete_contents_on_destroy  = true
+  labels                      = local.labels
+}
+
+# The dataset and its only grant live together: bootstrap runs before infra and
+# cannot grant on a dataset that does not exist yet.
+resource "google_bigquery_dataset_iam_member" "sql_tests_data_editor" {
+  for_each = var.sql_test_principal == null ? {} : google_bigquery_dataset.sql_tests
+
+  project    = var.project_id
+  dataset_id = each.value.dataset_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${var.sql_test_principal}"
+}
+
 resource "google_bigquery_table" "native" {
   for_each = local.tables
 

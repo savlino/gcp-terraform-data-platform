@@ -137,6 +137,13 @@ Required input `gitlab_project_path` is the exact, case-sensitive path, for
 example `savlino/gcp-terraform-data-platform`, without `https://gitlab.com/`.
 `ci_environments` defaults to `["dev"]`; each selection creates `ci-plan-<env>`
 and `ci-apply-<env>` in ops. TEST/PROD accounts can be provisioned later.
+The optional `enable_sql_test_access` flag defaults to `false`. Set it to
+`true` to create `ci-sqltest-dev`, its project-path WIF grant and DEV
+project-level BigQuery Job User. Bootstrap does **not** grant dataset access:
+the `sql_tests` dataset is created by infra, which is applied later, so infra
+also owns the dataset-level Data Editor grant (`sql_test_principal` in
+`infra/env/dev.tfvars`). Apply bootstrap first; an infra apply that grants a
+not-yet-created account fails. The SQL test account has no state-bucket grant.
 
 `developer_principal` defaults null and accepts `user:`/`group:` email members
 only. `human_access_environments` defaults to `["dev", "test"]` and can only

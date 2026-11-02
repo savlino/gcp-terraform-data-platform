@@ -1,8 +1,9 @@
 locals {
-  ci_projects  = { for env in var.ci_environments : env => local.projects[env] }
-  wif_pool     = "projects/${data.google_project.projects["ops"].number}/locations/global/workloadIdentityPools/gitlab"
-  wif_provider = "${local.wif_pool}/providers/gitlab-com"
-  wif_audience = "https://iam.googleapis.com/${local.wif_provider}"
+  ci_projects     = { for env in var.ci_environments : env => local.projects[env] }
+  sql_test_access = var.enable_sql_test_access ? { dev = var.dev_project_id } : {}
+  wif_pool        = "projects/${data.google_project.projects["ops"].number}/locations/global/workloadIdentityPools/gitlab"
+  wif_provider    = "${local.wif_pool}/providers/gitlab-com"
+  wif_audience    = "https://iam.googleapis.com/${local.wif_provider}"
 
   ci_plan_roles = toset([
     "roles/iam.securityReviewer",
@@ -98,6 +99,17 @@ resource "google_service_account" "ci_apply" {
   depends_on = [google_project_service.apis]
 }
 
+resource "google_service_account" "ci_sqltest_dev" {
+  for_each = local.sql_test_access
+
+  project      = var.ops_project_id
+  account_id   = "ci-sqltest-dev"
+  display_name = "dev-ci-sqltest"
+  description  = "GitLab SQL integration test identity; BigQuery job submission in DEV, data access granted by infra on sql_tests only."
+
+  depends_on = [google_project_service.apis]
+}
+
 resource "google_project_iam_member" "ci_plan" {
   for_each = local.ci_plan_grants
 
@@ -112,6 +124,14 @@ resource "google_project_iam_member" "ci_apply" {
   project = local.ci_projects[each.value.env]
   role    = each.value.role
   member  = "serviceAccount:${google_service_account.ci_apply[each.value.env].email}"
+}
+
+resource "google_project_iam_member" "ci_sqltest_dev_job_user" {
+  for_each = local.sql_test_access
+
+  project = each.value
+  role    = "roles/bigquery.jobUser"
+  member  = "serviceAccount:${google_service_account.ci_sqltest_dev["dev"].email}"
 }
 
 resource "google_storage_bucket_iam_member" "ci_plan_state" {
@@ -146,6 +166,16 @@ resource "google_service_account_iam_member" "apply_federation" {
   service_account_id = google_service_account.ci_apply[each.key].name
   role               = "roles/iam.workloadIdentityUser"
   member             = "principalSet://iam.googleapis.com/${local.wif_pool}/attribute.ref_protected/true"
+
+  depends_on = [google_iam_workload_identity_pool_provider.gitlab_com]
+}
+
+resource "google_service_account_iam_member" "sqltest_federation" {
+  for_each = local.sql_test_access
+
+  service_account_id = google_service_account.ci_sqltest_dev["dev"].name
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${local.wif_pool}/attribute.project_path/${var.gitlab_project_path}"
 
   depends_on = [google_iam_workload_identity_pool_provider.gitlab_com]
 }

@@ -109,6 +109,28 @@ variable "delete_contents_on_destroy" {
   default     = false
 }
 
+variable "enable_sql_test_dataset" {
+  type        = bool
+  description = "Create the disposable DEV-only BigQuery dataset used by SQL integration tests."
+  default     = false
+
+  validation {
+    condition     = !var.enable_sql_test_dataset || var.env == "dev"
+    error_message = "enable_sql_test_dataset may be true only when env is dev."
+  }
+}
+
+variable "sql_test_principal" {
+  type        = string
+  description = "Email of the bootstrap ci-sqltest-dev service account (output ci_sqltest_dev_service_account); granted Data Editor on sql_tests only. Required when enable_sql_test_dataset is true, null otherwise."
+  default     = null
+
+  validation {
+    condition     = (var.sql_test_principal != null) == var.enable_sql_test_dataset
+    error_message = "sql_test_principal must be set exactly when enable_sql_test_dataset is true (DEV), and null otherwise."
+  }
+}
+
 variable "subnet_cidr" {
   type        = string
   description = "Private IPv4 subnet CIDR; null selects dev 10.10.0.0/24, test 10.20.0.0/24 or prod 10.30.0.0/24. Validated by network."

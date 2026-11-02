@@ -28,3 +28,7 @@ dist/
 .env.*
 .github/
 !.env.example
+
+# Local Terraform guard (scripts/tf.ps1)
+*.tfplan.meta.json
+*.allow-destroy

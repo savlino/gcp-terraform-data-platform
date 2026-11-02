@@ -4,6 +4,83 @@ Operational procedures. Commands are for **PowerShell 7 on Windows**, run from
 the repository root. Examples target DEV (`dep-2610-dev`); change `$project`
 for other environments.
 
+## Local Terraform: only through `scripts/tf.ps1`
+
+Local `infra` plans and applies run **only** through
+[scripts/tf.ps1](../scripts/tf.ps1) (Windows PowerShell 5.1 or PowerShell 7).
+Do not run `terraform plan`/`apply` against `infra` by hand. Background:
+[2026-10-29 incident](incidents/2026-10-29-cross-env-plan.md), where a TEST plan
+built on the DEV backend deleted DEV resources.
+
+```powershell
+.\scripts\tf.ps1 -Env dev -Action plan    # init -reconfigure, plan, plan JSON, policy check (incl. P12)
+.\scripts\tf.ps1 -Env dev -Action apply   # applies only that checked plan, within 30 minutes
+```
+
+What it enforces, every run (the active env and project are printed first):
+
+- `-Env` is `dev`, `test` or `prod`; `env/<env>.tfvars` must have matching `env`
+  and `project_id = dep-2610-<env>`, and `env/<env>.gcs.tfbackend` must have
+  `prefix = infra/<env>`.
+- `TF_DATA_DIR` is `infra\.terraform-<env>` (restored when the script ends) and
+  `init -reconfigure` always uses that environment's backend file.
+- After the plan, `check_plan.py --env <env> --project-id dep-2610-<env>` must pass;
+  P12 rejects a plan that touches any other project.
+- `apply` refuses unless `infra\<env>.tfplan` was created by the script for the
+  same env and project, passed the policy check, is byte-identical to what was
+  checked, and is at most 30 minutes old. The plan is deleted after apply.
+- Any non-zero exit code of terraform or the policy check stops the script.
+
+Intentional destroys: list each reviewed resource address, one per line, in
+`infra\<env>.allow-destroy` (git-ignored, one file per environment; blank lines
+and `#` comments ignored) before `plan`. The script passes it as
+`--allow-destroy-file` and prints the listed addresses. Only those addresses
+are exempt from P10 (stateful delete/replace) and P13 (relaxing protection);
+every other address still fails. Every listed address must actually be used by
+a P10 delete/replace or a P13 relaxation in this plan; an unused (stale) or
+duplicated entry fails with `FAIL [P10] <address>: stale allow-destroy entry`
+or a duplicate message, so a leftover file cannot silently pre-approve a future
+delete. Delete the file as soon as the apply is done.
+The local script never uses the global `--allow-destroy`.
+
+### Protection is relaxed per resource, never per environment
+
+To remove or replace **one** protected resource, do not flip the
+environment-wide `deletion_protection` or `force_destroy` variables in
+`env/<env>.tfvars`: that unprotects every table, the Cloud Run job and the raw
+bucket at once, and it stays off until someone remembers to flip it back.
+Instead:
+
+1. Prefer a path that needs no unprotecting: `removed { destroy = false }`
+   to forget a resource and delete it by hand, or an in-place change such as
+   `ALTER TABLE` instead of a replacement.
+2. If Terraform must delete it, override protection on that resource only in
+   code (for example a per-table override map in the module), list exactly that
+   address in `infra\<env>.allow-destroy`, plan, review, apply, then remove the
+   override and the file in the next change.
+
+P13 enforces this: any plan that turns `deletion_protection` from `true` to
+`false`, or `force_destroy` from `false` to `true`, on a bucket, dataset, table,
+secret or Artifact Registry repository fails unless that address is listed.
+An environment-wide flip therefore fails with one finding per resource.
+
+Resources that never hold data (for example a view or a staging object that
+is always rebuilt) set `deletion_protection = false` explicitly in code, with a
+comment saying why, instead of reading the environment variable. There is no
+such resource in the current configuration; every native table, the Cloud Run
+job and the raw bucket use the environment variables.
+
+Read-only commands (`terraform output`, `state list`) need the same data
+directory, otherwise they read whatever backend `infra\.terraform` was last
+initialised with:
+
+```powershell
+$env:TF_DATA_DIR = (Join-Path (Resolve-Path .\infra).Path '.terraform-dev')
+```
+
+Bootstrap (`terraform -chdir=bootstrap ...`) is a separate root module with its
+own state and is not covered by this script.
+
 ## GitLab WIF bootstrap and MR plans
 
 This section is deployment guidance, not a record of live federation.
@@ -69,14 +146,10 @@ Review a normal DEV infra plan and apply it manually as the existing deployer:
 $sa = Read-Host 'Existing Terraform deployment service account email'
 if (-not $sa) { throw 'SA email is empty: tests would run as your own user' }
 gcloud auth application-default login --impersonate-service-account=$sa
-terraform -chdir=infra init -reconfigure -backend-config=env/dev.gcs.tfbackend
-if ($LASTEXITCODE -ne 0) { throw 'Infra backend initialization failed' }
-terraform -chdir=infra plan -var-file=env/dev.tfvars -out=human-migration.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Infra migration plan failed' }
+.\scripts\tf.ps1 -Env dev -Action plan
 # Expected human removals if present: old runtime Token Creator, demo IAP and demo OS Login.
 # VM/network changes are not required for this IAM migration.
-terraform -chdir=infra apply human-migration.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Infra human-grant migration failed' }
+.\scripts\tf.ps1 -Env dev -Action apply
 ```
 
 Do not remove state entries manually or disable the VM as an IAM-migration
@@ -224,11 +297,13 @@ migration.
    longer propose this schema replacement; stop if it still does.
 3. P10 blocks only delete/replacement of stateful resources. The forgotten
    external table does not trigger it. If the plan still contains a reviewed
-   `ookla_tiles` replacement, use `--allow-destroy` for that plan only, or a
-   one-pipeline `ALLOW_DESTROY=true` override for the existing CI checker. The
-   override disables **all of P10**, not an address-specific exception; review
-   every deletion. Never persist it in CI configuration or project variables.
-   P1-P9 and P11 remain active.
+   `ookla_tiles` replacement, list exactly that address in
+   `infra\<env>.allow-destroy` for that environment only (see
+   [Local Terraform](#local-terraform-only-through-scriptstfps1)). In CI, a
+   one-pipeline `ALLOW_DESTROY=true` override disables **all of P10**, not an
+   address-specific exception; review every deletion and never persist it in CI
+   configuration or project variables. It does not disable P13. Other rules
+   remain active.
 4. Apply the reviewed saved plan, then delete the forgotten external table by
    hand in each environment (the `bq rm` commands below). Then deploy a newly
    built image containing the new source contract and SQL. Existing image
@@ -305,28 +380,19 @@ if ($LASTEXITCODE -eq 0) { throw 'Table still exists.' }
 ```powershell
 $envName = 'dev'
 $env:TF_DATA_DIR = Join-Path (Resolve-Path .\infra).Path ".terraform-$envName"
-terraform -chdir=infra init -reconfigure -lockfile=readonly "-backend-config=env\$envName.gcs.tfbackend"
-if ($LASTEXITCODE -ne 0) { throw 'Backend initialization failed.' }
 terraform -chdir=infra state list
 if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect environment state.' }
-terraform -chdir=infra plan "-var-file=env\$envName.tfvars" "-out=$envName.tfplan"
-if ($LASTEXITCODE -ne 0) { throw 'Migration plan failed.' }
-terraform -chdir=infra show -json "$envName.tfplan" > "infra\$envName.plan.json"
-if ($LASTEXITCODE -ne 0) { throw 'Cannot render migration plan.' }
 
 # P10 must reject only if the plan still contains a stateful delete/replacement
 # (for example the reviewed ookla_tiles replacement). The forgotten external
-# table must not cause it.
-.\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName
-$p10 = $LASTEXITCODE
-if ($p10 -eq 0) { Write-Output 'P10 passed: no stateful delete/replacement in this plan.' }
-elseif ($p10 -ne 1) { throw 'Policy check failed unexpectedly.' }
-# Only after reviewing all deletes, and only if the previous check exited 1:
-if ($p10 -eq 1) {
-  .\app\.venv\Scripts\python.exe scripts\check_plan.py "infra\$envName.plan.json" --env $envName --allow-destroy
-  if ($LASTEXITCODE -ne 0) { throw 'Another policy rule failed; do not apply.' }
-}
-terraform -chdir=infra apply "$envName.tfplan"
+# table must not cause it. The script stops with a policy failure if it does.
+.\scripts\tf.ps1 -Env $envName -Action plan
+# Only after reviewing every delete: list exactly the reviewed address, plan
+# again, apply. If there are no reviewed destroys, skip the file and its cleanup.
+Set-Content -Path ".\infra\$envName.allow-destroy" -Value 'module.bigquery.google_bigquery_table.native["ookla_tiles"]'
+.\scripts\tf.ps1 -Env $envName -Action plan
+.\scripts\tf.ps1 -Env $envName -Action apply
+Remove-Item ".\infra\$envName.allow-destroy"
 ```
 
 For the application checks, use runtime impersonation/configuration from
@@ -440,12 +506,9 @@ Cloud Run has no VPC attachment before or after this apply.
 
 ```powershell
 $project = 'dep-2610-dev' # Do not reuse the last project from default-network cleanup.
-terraform -chdir=infra init -reconfigure -input=false '-backend-config=env/dev.gcs.tfbackend'
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=network-dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Network plan failed' }
+.\scripts\tf.ps1 -Env dev -Action plan
 # Review before applying: four network additions, no VM/IAP IAM, if earlier steps are current.
-terraform -chdir=infra apply network-dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Network apply failed' }
+.\scripts\tf.ps1 -Env dev -Action apply
 gcloud compute networks describe dev-private --project=$project --impersonate-service-account=$admin --format=json
 if ($LASTEXITCODE -ne 0) { throw 'Custom VPC inspection failed' }
 gcloud compute networks subnets describe dev-private --region=europe-southwest1 --project=$project --impersonate-service-account=$admin --format=json
@@ -534,17 +597,15 @@ The explicit deny and implied ingress deny remain active throughout.
 apply as the deployer, retaining the intended developer setting:
 
 ```powershell
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=network-dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Demo teardown plan failed' }
+.\scripts\tf.ps1 -Env dev -Action plan
 # Review: destroy demo VM and its two instance IAM members; boot disk auto-deletes.
-terraform -chdir=infra apply network-dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Demo teardown failed; billable resources may remain' }
+.\scripts\tf.ps1 -Env dev -Action apply
 gcloud compute instances list --project=$project --impersonate-service-account=$admin --filter="name=$vm" --format='value(name)'
 if ($LASTEXITCODE -ne 0) { throw 'VM absence check failed' }
 gcloud compute disks list --project=$project --impersonate-service-account=$admin --filter="name=$diskName" --format='value(name)'
 if ($LASTEXITCODE -ne 0) { throw 'Boot disk absence check failed' }
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' -detailed-exitcode
-if ($LASTEXITCODE -ne 0) { throw 'Post-teardown plan is not clean' }
+.\scripts\tf.ps1 -Env dev -Action plan
+# Expected: "No changes." in the plan output.
 ```
 
 Expected: VM/disk listings are empty, no demo IAM remains, the four network
@@ -675,12 +736,9 @@ tfvars; keep `image_digest = null` until a real published digest is available.
 Keep `enable_ingest_job = false` for first provisioning.
 
 ```powershell
-terraform -chdir=infra init -reconfigure -input=false '-backend-config=env/dev.gcs.tfbackend'
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Infrastructure plan failed' }
+.\scripts\tf.ps1 -Env dev -Action plan
 # Review the plan before continuing: no job/scheduler yet.
-terraform -chdir=infra apply dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Infrastructure apply failed' }
+.\scripts\tf.ps1 -Env dev -Action apply
 ```
 
 No environment repository is created. Stop on unexpected deletions or environment
@@ -738,11 +796,10 @@ network types and all quarters from `MIN_QUARTER`, not just the Iberian subset
 of source bytes. Source objects are global and can be large.
 
 ```powershell
-terraform -chdir=infra plan '-var-file=env/dev.tfvars' -out=dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Job plan failed' }
+.\scripts\tf.ps1 -Env dev -Action plan
 # Review: four additions (job, scheduler SA, job IAM member, paused schedule).
-terraform -chdir=infra apply dev.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Job apply failed' }
+.\scripts\tf.ps1 -Env dev -Action apply
+$env:TF_DATA_DIR = Join-Path (Resolve-Path .\infra).Path '.terraform-dev' # for the read-only outputs below
 
 $project = 'dep-2610-dev'
 $region = 'europe-southwest1'
@@ -901,7 +958,7 @@ Safety rules for every block below:
 
 ### Prerequisites
 
-- `terraform -chdir=infra apply` has created the secret, and the infra backend is initialised.
+- `.\scripts\tf.ps1 -Env <env> -Action apply` has created the secret, and the infra backend is initialised.
 - Your gcloud account, or an authorised provisioning service account, has
   `secretmanager.versions.add` on the secret. The runtime SA intentionally lacks it.
 - For the test step: your account has the non-PROD Token Creator grant on the

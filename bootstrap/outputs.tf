@@ -33,6 +33,11 @@ output "ci_apply_service_accounts" {
   value       = { for env, account in google_service_account.ci_apply : env => account.email }
 }
 
+output "ci_sqltest_dev_service_account" {
+  description = "Ops-project DEV SQL test CI service account email (infra sql_test_principal); null until enabled."
+  value       = try(google_service_account.ci_sqltest_dev["dev"].email, null)
+}
+
 output "state_bucket_name" {
   description = "Name of the Terraform state bucket in the ops project."
   value       = google_storage_bucket.terraform_state.name

@@ -43,6 +43,11 @@ output "dataset_id" {
   value       = module.bigquery.dataset_id
 }
 
+output "sql_test_dataset_id" {
+  description = "Disposable DEV SQL test dataset ID; null when disabled."
+  value       = module.bigquery.sql_test_dataset_id
+}
+
 output "table_ids" {
   description = "Native BigQuery table IDs keyed by purpose."
   value       = module.bigquery.table_ids

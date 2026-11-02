@@ -1,8 +1,10 @@
 # BigQuery module
 
-Creates the `network_perf` dataset and three empty native tables. No dataset
-default table expiration, table expiration or partition expiration is configured.
-No IAM grants or data-loading/query jobs are created.
+Creates the `network_perf` dataset and three empty native tables. Optionally
+creates a disposable `sql_tests` dataset for DEV integration tests and grants
+`roles/bigquery.dataEditor` on that dataset only to `sql_test_principal`. No
+other IAM grants or data-loading/query jobs are created; runtime grants live in
+the [IAM module](../iam/README.md).
 
 | Input | Purpose | Default |
 | --- | --- | --- |
@@ -11,8 +13,17 @@ No IAM grants or data-loading/query jobs are created.
 | `location` | Same regional location as raw storage | Required |
 | `deletion_protection` | Prevent Terraform table deletion | `true` |
 | `delete_contents_on_destroy` | Allow dataset deletion with contents | `false` |
+| `enable_sql_test_dataset` | Create the disposable SQL test dataset | `false` |
+| `sql_test_principal` | SA email granted Data Editor on `sql_tests` only; ignored when the dataset is disabled | `null` |
 
-Outputs: `dataset_id`, `table_ids`.
+Outputs: `dataset_id`, `sql_test_dataset_id` (null when disabled), `table_ids`.
+
+When enabled, `sql_tests` has a one-hour default table expiration, the standard
+environment labels and `delete_contents_on_destroy = true`. The Google
+BigQuery dataset resource has no table-style `deletion_protection` field; this
+is intentionally a disposable dataset and must not hold real data. The grant is
+in this module, next to the dataset, because bootstrap is applied before infra
+and cannot grant on a dataset that does not exist yet.
 
 Native schemas are loaded from the repository's [schemas directory](../../schemas/).
 Keep that directory when consuming this local module.

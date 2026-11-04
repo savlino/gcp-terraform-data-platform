@@ -23,11 +23,13 @@ resource "google_bigquery_dataset" "network_perf" {
 resource "google_bigquery_dataset" "sql_tests" {
   for_each = var.enable_sql_test_dataset ? { sql_tests = true } : {}
 
-  project                     = var.project_id
-  dataset_id                  = "sql_tests"
-  friendly_name               = "${var.env}-sql-tests"
-  location                    = var.location
+  project       = var.project_id
+  dataset_id    = "sql_tests"
+  friendly_name = "${var.env}-sql-tests"
+  location      = var.location
+  # Tables here are created by tests, not by Terraform.
   default_table_expiration_ms = 3600000
+  deletion_policy             = "DELETE" # holds no real data
   delete_contents_on_destroy  = true
   labels                      = local.labels
 }
@@ -40,7 +42,7 @@ resource "google_bigquery_dataset_iam_member" "sql_tests_data_editor" {
   project    = var.project_id
   dataset_id = each.value.dataset_id
   role       = "roles/bigquery.dataEditor"
-  member     = "serviceAccount:${var.sql_test_principal}"
+  member     = var.sql_test_principal
 }
 
 resource "google_bigquery_table" "native" {

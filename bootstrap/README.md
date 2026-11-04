@@ -56,6 +56,14 @@ Use the narrowest applicable scope and verify current role permissions in Google
 
 ## Apply using local state first
 
+This one-time run, before the state bucket exists, is the only bootstrap plan and
+apply outside [scripts/tf.ps1](../scripts/tf.ps1). Once the state is in GCS,
+bootstrap is planned and applied only with `.\scripts\tf.ps1 -Root bootstrap
+-Action plan|apply`. Inputs come from `TF_VAR_*` or a gitignored
+`personal.auto.tfvars`, deletes are guarded by
+`bootstrap/allow-destroy`, and the plan is single-use for 30 minutes. See the
+[runbook](../docs/runbook.md#bootstrap-only-through-scriptstfps1--root-bootstrap).
+
 **PowerShell 7 on Windows**, from the repository root:
 
 ```powershell
@@ -68,6 +76,7 @@ Move-Item .\backend.tf .\backend.tf.disabled
 terraform init
 terraform fmt -check
 terraform validate
+$env:TF_VAR_developer_principal = Read-Host 'Required user:<email> principal'
 terraform plan -var="billing_account_id=YOUR-BILLING-ACCOUNT-ID" -var="gitlab_project_path=YOUR-NAMESPACE/YOUR-PROJECT" -out=bootstrap.tfplan
 terraform apply bootstrap.tfplan
 ```
@@ -115,28 +124,34 @@ The caller needs permission to enable the API. Re-run `terraform apply` after th
 
 ## Verify
 
-**PowerShell 7**, from `bootstrap/`:
+**PowerShell 5.1 or 7**, from the repository root:
 
 ```powershell
 gcloud storage buckets describe gs://dep-2610-ops-tf-state --format="yaml(name,versioning,iamConfiguration.uniformBucketLevelAccess,iamConfiguration.publicAccessPrevention)"
 gcloud storage ls gs://dep-2610-ops-tf-state/bootstrap/
-terraform plan -var="billing_account_id=YOUR-BILLING-ACCOUNT-ID" -var="gitlab_project_path=YOUR-NAMESPACE/YOUR-PROJECT"
+$env:TF_VAR_billing_account_id = 'YOUR-BILLING-ACCOUNT-ID'
+$env:TF_VAR_gitlab_project_path = 'YOUR-NAMESPACE/YOUR-PROJECT'
+.\scripts\tf.ps1 -Root bootstrap -Action plan
 ```
 
-Confirm object versioning is enabled, public access prevention is enforced, and a state object exists under `bootstrap/`. In the Cloud Console, confirm the budget covers the four project IDs and is visible in **Billing > Budgets & alerts**. The second plan should report no changes.
+Confirm object versioning is enabled, public access prevention is enforced, and a state object exists under `bootstrap/`. In the Cloud Console, confirm the budget covers the four project IDs and is visible in **Billing > Budgets & alerts**. The plan should report `0 to add, 0 to change, 0 to destroy`.
 
 Negative check: run a plan with a non-three-letter currency code; variable validation must reject it before any changes:
 
 ```powershell
-terraform plan -var="billing_account_id=YOUR-BILLING-ACCOUNT-ID" -var="gitlab_project_path=YOUR-NAMESPACE/YOUR-PROJECT" -var="budget_currency_code=EURO"
+$env:TF_VAR_budget_currency_code = 'EURO'
+.\scripts\tf.ps1 -Root bootstrap -Action plan   # must throw: terraform plan failed
+Remove-Item Env:\TF_VAR_budget_currency_code
 ```
 
 ## GitLab federation and human access
 
 Required input `gitlab_project_path` is the exact, case-sensitive path, for
 example `savlino/gcp-terraform-data-platform`, without `https://gitlab.com/`.
-`ci_environments` defaults to `["dev"]`; each selection creates `ci-plan-<env>`
-and `ci-apply-<env>` in ops. TEST/PROD accounts can be provisioned later.
+`local.ci_environments` derives every project except ops from `local.projects`.
+It creates `ci-plan-<env>` and `ci-apply-<env>` in ops for DEV, TEST and PROD;
+there is no input variable to select a smaller set. Existing environment and
+`<env>/<role>` resource keys are preserved.
 The optional `enable_sql_test_access` flag defaults to `false`. Set it to
 `true` to create `ci-sqltest-dev`, its project-path WIF grant and DEV
 project-level BigQuery Job User. Bootstrap does **not** grant dataset access:
@@ -144,9 +159,17 @@ the `sql_tests` dataset is created by infra, which is applied later, so infra
 also owns the dataset-level Data Editor grant (`sql_test_principal` in
 `infra/env/dev.tfvars`). Apply bootstrap first; an infra apply that grants a
 not-yet-created account fails. The SQL test account has no state-bucket grant.
+Its email is the `sqltest_sa_email` output (null while the flag is false).
+Set `sql_test_principal` in `infra/env/dev.tfvars` to
+`serviceAccount:<sqltest_sa_email>`.
 
-`developer_principal` defaults null and accepts `user:`/`group:` email members
-only. `human_access_environments` defaults to `["dev", "test"]` and can only
+`developer_principal` has no default: supply `user:<email>` or explicit HCL
+`null` to disable human access. Groups are rejected. Set
+`TF_VAR_developer_principal` for a user, or use the gitignored
+`bootstrap/personal.auto.tfvars` (relative to the repository root), including
+`developer_principal = null` for the deliberate no-access choice. The string
+`"null"` in an environment variable is not HCL null for this string input.
+`human_access_environments` defaults to `["dev", "test"]` and can only
 contain non-prod environments. When set, exactly two project-level roles are
 granted in those selected non-prod projects, regardless of the CI environment
 selection or demo VM flag:
@@ -180,7 +203,7 @@ tag/digest-free image path used by every environment; no environment state
 lookup is required.
 
 Bootstrap generates Cloud Run service identities for **all three** environment
-projects independently of `ci_environments`, then assigns each
+projects, then assigns each
 `roles/artifactregistry.reader` on this repository only. The email format is
 `service-<project-number>@serverless-robot-prod.iam.gserviceaccount.com`;
 the exported `cloud_run_service_agents` map exposes the generated identities.

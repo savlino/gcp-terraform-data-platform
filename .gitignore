@@ -24,6 +24,7 @@ dist/
 *.egg-info/
 
 # Local environment files
+bootstrap/personal.auto.tfvars
 .env
 .env.*
 .github/
@@ -32,3 +33,4 @@ dist/
 # Local Terraform guard (scripts/tf.ps1)
 *.tfplan.meta.json
 *.allow-destroy
+bootstrap/allow-destroy

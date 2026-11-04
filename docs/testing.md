@@ -44,6 +44,21 @@ Set-Location ..
 .\app\.venv\Scripts\python.exe -m pytest scripts\tests
 ```
 
+Mock providers replace cloud calls, not root input variables. The bootstrap
+test files explicitly set `developer_principal`,
+`human_access_environments` and `enable_sql_test_access` in their file-level
+`variables` blocks, so deployment `TF_VAR_*` values for these inputs cannot
+change the test scenarios. Individual runs override these fixtures to test
+enabled access and invalid inputs. Keep deployment variables intact when
+running tests; clearing them can change the next real plan.
+CI environments are derived from the project map, with literal assertions for
+`dev`, `test`, `prod` and exclusion of `ops`. The explicit-null fixture checks
+that no human bindings are created; negative runs reject groups, bare emails,
+workload identities and PROD human access. Missing required input is checked
+with the noninteractive wrapper procedure in the
+[bootstrap runbook](runbook.md#bootstrap-only-through-scriptstfps1--root-bootstrap),
+not with `expect_failures`, which handles validation rather than missing inputs.
+
 In CI, Ruff and Python tests run with Python 3.12. Terraform formatting,
 validation and mocked tests use the pinned Terraform image; TFLint uses its
 pinned image. The Terraform JSON policy checker consumes plans from the

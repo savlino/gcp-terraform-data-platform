@@ -80,8 +80,10 @@ run "sql_test_dataset_enabled" {
     source = "../modules/bigquery"
   }
   variables {
-    enable_sql_test_dataset = true
-    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    enable_sql_test_dataset    = true
+    sql_test_principal         = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    deletion_protection        = true
+    delete_contents_on_destroy = false
   }
 
   assert {
@@ -91,6 +93,7 @@ run "sql_test_dataset_enabled" {
       google_bigquery_dataset.sql_tests["sql_tests"].dataset_id == "sql_tests" &&
       google_bigquery_dataset.sql_tests["sql_tests"].location == "europe-southwest1" &&
       google_bigquery_dataset.sql_tests["sql_tests"].default_table_expiration_ms == 3600000 &&
+      google_bigquery_dataset.sql_tests["sql_tests"].deletion_policy == "DELETE" &&
       google_bigquery_dataset.sql_tests["sql_tests"].delete_contents_on_destroy &&
       google_bigquery_dataset.sql_tests["sql_tests"].labels == tomap({
         project = "gcp-tf-portfolio", env = "dev", managed_by = "terraform"
@@ -104,6 +107,7 @@ run "sql_test_dataset_enabled" {
       toset(keys(google_bigquery_dataset_iam_member.sql_tests_data_editor)) == toset(["sql_tests"]) &&
       google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].project == "dep-2610-dev" &&
       google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].dataset_id == "sql_tests" &&
+      google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].dataset_id != google_bigquery_dataset.network_perf.dataset_id &&
       google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].role == "roles/bigquery.dataEditor" &&
       google_bigquery_dataset_iam_member.sql_tests_data_editor["sql_tests"].member == "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
     )
@@ -117,7 +121,7 @@ run "sql_test_dataset_disabled" {
     source = "../modules/bigquery"
   }
   variables {
-    sql_test_principal = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    sql_test_principal = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
   }
 
   assert {
@@ -141,14 +145,14 @@ run "sql_test_dataset_without_principal_has_no_grant" {
   }
 }
 
-run "reject_sql_test_member_prefix" {
+run "reject_sql_test_bare_email" {
   command = plan
   module {
     source = "../modules/bigquery"
   }
   variables {
     enable_sql_test_dataset = true
-    sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
   }
   expect_failures = [var.sql_test_principal]
 }
@@ -160,7 +164,19 @@ run "reject_sql_test_human_principal" {
   }
   variables {
     enable_sql_test_dataset = true
-    sql_test_principal      = "someone@example.com"
+    sql_test_principal      = "user:someone@example.com"
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
+run "reject_sql_test_non_service_account_domain" {
+  command = plan
+  module {
+    source = "../modules/bigquery"
+  }
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@example.com"
   }
   expect_failures = [var.sql_test_principal]
 }

@@ -78,8 +78,80 @@ initialised with:
 $env:TF_DATA_DIR = (Join-Path (Resolve-Path .\infra).Path '.terraform-dev')
 ```
 
-Bootstrap (`terraform -chdir=bootstrap ...`) is a separate root module with its
-own state and is not covered by this script.
+### Bootstrap: only through `scripts/tf.ps1 -Root bootstrap`
+
+Bootstrap is planned and applied only through the same script. It has one state
+(`dep-2610-ops-tf-state`, prefix `bootstrap`) for the ops project and the
+cross-project grants, so it takes no `-Env`:
+
+**PowerShell 5.1 or 7**, repository root:
+
+```powershell
+$env:TF_VAR_billing_account_id = Read-Host 'Existing billing account ID'
+$env:TF_VAR_gitlab_project_path = Read-Host 'Exact GitLab namespace/project path'
+$env:TF_VAR_developer_principal = Read-Host 'Required human user:<email> principal'
+.\scripts\tf.ps1 -Root bootstrap -Action plan
+.\scripts\tf.ps1 -Root bootstrap -Action apply
+```
+
+Differences from `-Root infra`:
+
+- `developer_principal` is required, with no default. Supply
+  `TF_VAR_developer_principal = 'user:<email>'`, or set the value in
+  `bootstrap/personal.auto.tfvars` (gitignored; never commit personal inputs).
+  To deliberately disable human access, put `developer_principal = null` in
+  that file. Do not use an empty string or the environment string `"null"`.
+  An auto tfvars file takes precedence over environment variables.
+  Keep the other required inputs (`billing_account_id`, `gitlab_project_path`)
+  supplied as before.
+- CI environments are derived from `local.projects`, excluding ops. DEV,
+  TEST and PROD CI identities are always included, with unchanged environment
+  and `<env>/<role>` instance keys.
+- `TF_DATA_DIR` is unset during the run and restored afterwards. Bootstrap uses
+  its default `bootstrap\.terraform` directory with a plain
+  `terraform init -input=false`.
+- The plan goes to `bootstrap\bootstrap.tfplan`. The script prints
+  `Bootstrap plan: N to add, N to change, N to destroy` and lists every address
+  to be destroyed. A replace counts as a destroy.
+- [check_bootstrap_plan.py](../scripts/check_bootstrap_plan.py) fails the plan
+  on **any** delete or replace, of any resource type, unless the address is
+  listed in `bootstrap\allow-destroy`. Bootstrap holds the state bucket, WIF and
+  every CI identity, so no deletion there is routine.
+  - The allow file uses the same format as the infra allow files: one address per
+    line; `#` comments and blank lines are ignored; duplicates fail.
+  - It follows the same stale-entry rule: an entry not used by a delete in this
+    plan fails.
+  - It is git-ignored. Delete it after the apply.
+- Apply accepts only a `bootstrap.tfplan` that this script created and checked
+  (marker `root = bootstrap`), not older than 30 minutes. Each plan is
+  single-use. A plan file created outside the script, such as an old
+  `bootstrap\wif.tfplan` or `bootstrap.tfplan`, is refused.
+
+Read-only commands (`terraform -chdir=bootstrap output ...`) stay direct. Run them
+without `TF_DATA_DIR` set.
+
+#### Verify required bootstrap inputs
+
+**PowerShell**, repository root, with the existing backend and administrator
+ADC configured:
+
+1. Supply the existing `user:<email>` principal through
+   `TF_VAR_developer_principal` (and the other required bootstrap inputs), then:
+   ```powershell
+   .\scripts\tf.ps1 -Root bootstrap -Action plan
+   ```
+   Expected for the existing three-environment deployment: **0 to destroy**,
+   with only step 11 C2 SQL-test identity/grant creates if enabled and not yet
+   applied. Keep the existing feature-flag values, including
+   `enable_sql_test_access`; this change does not make all other inputs required.
+   Stop on unexpected changes; do not allow-list removals to pass this check.
+2. Negative check: in a fresh PowerShell session, supply the other required
+   inputs but omit `TF_VAR_developer_principal`. Ensure no auto tfvars file
+   supplies it (temporarily move a personal file aside and restore it
+   afterwards). Run the same wrapper plan command. Expected: non-zero failure
+   with **No value for required variable** naming `developer_principal`, not
+   a plan deleting human grants. Backend initialization still requires working
+   authentication/connectivity. Do not run apply for this check.
 
 ## GitLab WIF bootstrap and MR plans
 
@@ -95,9 +167,9 @@ needed.
 1. Use an authorized administrator's **user ADC** for bootstrap, not the runtime
    or a CI account. Keep the existing bootstrap GCS backend; the initial
    local-to-GCS migration is not repeated.
-2. Set the exact GitLab source project path and optional human principal in your
+2. Set the exact GitLab source project path and explicit human-access choice in your
    local bootstrap inputs. Human grants are project-wide Token Creator and IAP
-   on DEV **and TEST**, even while only DEV CI accounts exist. PROD receives
+   on DEV **and TEST**, while CI accounts cover all three environments. PROD receives
    neither. Keep these same bootstrap inputs on future plans.
 3. Apply/recheck bootstrap **before** removing the old infra resource-scoped
    human grants. These independent states cannot use a Terraform `moved` block.
@@ -110,20 +182,17 @@ needed.
 ```powershell
 gcloud auth application-default login
 gcloud auth application-default set-quota-project dep-2610-ops
-$billing = Read-Host 'Existing billing account ID'
-$path = Read-Host 'Exact GitLab namespace/project path'
-$developer = Read-Host 'Human user:/group: email principal'
-if (-not $billing -or -not $path -or -not $developer) { throw 'Bootstrap inputs must not be empty' }
-$inputs = @("-var=billing_account_id=$billing", "-var=gitlab_project_path=$path", "-var=developer_principal=$developer")
-terraform -chdir=bootstrap init -input=false
-if ($LASTEXITCODE -ne 0) { throw 'Bootstrap backend initialization failed' }
-terraform -chdir=bootstrap plan @inputs -out=wif.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Bootstrap plan failed' }
-# Review WIF, DEV CI roles, state-bucket grants and exactly four DEV/TEST human grants.
-terraform -chdir=bootstrap apply wif.tfplan
-if ($LASTEXITCODE -ne 0) { throw 'Bootstrap apply failed' }
-terraform -chdir=bootstrap plan @inputs -detailed-exitcode
-if ($LASTEXITCODE -ne 0) { throw 'Bootstrap is not yet converged' }
+$env:TF_VAR_billing_account_id = Read-Host 'Existing billing account ID'
+$env:TF_VAR_gitlab_project_path = Read-Host 'Exact GitLab namespace/project path'
+$env:TF_VAR_developer_principal = Read-Host 'Human user:<email> principal'
+if (-not $env:TF_VAR_billing_account_id -or -not $env:TF_VAR_gitlab_project_path -or -not $env:TF_VAR_developer_principal) {
+    throw 'Bootstrap inputs must not be empty'
+}
+.\scripts\tf.ps1 -Root bootstrap -Action plan
+# Review WIF, all environment CI roles, state-bucket grants and four DEV/TEST human grants.
+.\scripts\tf.ps1 -Root bootstrap -Action apply
+# Converged: the next plan must report 0 to add, 0 to change, 0 to destroy.
+.\scripts\tf.ps1 -Root bootstrap -Action plan
 terraform -chdir=bootstrap output project_numbers
 terraform -chdir=bootstrap output -raw gitlab_wif_provider
 terraform -chdir=bootstrap output -raw gitlab_wif_audience
@@ -131,15 +200,16 @@ terraform -chdir=bootstrap output ci_plan_service_accounts
 terraform -chdir=bootstrap output ci_apply_service_accounts
 ```
 
-To omit human grants, omit `developer_principal` instead of using this example's
-required `$developer` input. Do not commit personal emails unless intentional.
-The plan/apply role grants target only DEV by default; the four human grants
+To omit human grants deliberately, set `developer_principal = null` in the
+gitignored personal auto tfvars file. Omitting the variable is an error.
+The plan/apply role grants target DEV, TEST and PROD; the four human grants
 target DEV/TEST projects. Review every incremental change rather than expecting
 a fixed total resource count.
 
 Then restore the existing, separate infra deployment ADC (not runtime ADC).
 Remove any old `developer_principal` setting from local **infra** tfvars,
-`TF_VAR_developer_principal`, saved command lines or wrappers, not bootstrap.
+saved command lines or infra wrappers, not bootstrap. Preserve the required
+bootstrap input.
 Review a normal DEV infra plan and apply it manually as the existing deployer:
 
 ```powershell
@@ -244,8 +314,9 @@ a saved plan when the state changed after planning.
 
 Prerequisites (not done by this repository change):
 
-1. Bootstrap: set `ci_environments = ["dev", "test", "prod"]` and apply it with
-   the bootstrap deployer. This creates `ci-plan/apply-test` and `-prod`, and
+1. Bootstrap: use `.\scripts\tf.ps1 -Root bootstrap` with the bootstrap deployer
+   to plan and then apply. All environment projects automatically get CI
+   identities. This creates missing `ci-plan/apply-test` and `-prod`, and
    grants the prod apply identity broad roles on PROD; review the plan first.
 2. Copy the image into the ops repository (see the shared-registry runbook) and
    set the same `image_tag` or `image_digest` in all three tfvars.
@@ -633,8 +704,8 @@ not copy them. Retained old repositories still incur storage charges.
 
 1. Pause scheduled launches and serialize deployments. Use the authorized local
    bootstrap administrator's ADC and your existing billing/GitLab/human inputs.
-   Run `terraform -chdir=bootstrap init`, review/save the bootstrap plan, then
-   apply it. Expect the shared ops repository, three Cloud Run service identities,
+   Run `.\scripts\tf.ps1 -Root bootstrap -Action plan`, review it, then
+   `-Action apply`. Expect the shared ops repository, three Cloud Run service identities,
    repository-level Reader grants for all three agents, and Reader for configured
    CI apply SAs. Environment registry Admin/Reader project grants on CI identities
    are removed. Normal Cloud Run service-agent project roles must remain intact.

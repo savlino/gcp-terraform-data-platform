@@ -1,7 +1,7 @@
 env                     = "dev"
 project_id              = "dep-2610-dev"
 enable_sql_test_dataset = true
-sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
 region                  = "europe-southwest1"
 scheduler_region        = "europe-west1"
 subnet_cidr             = "10.10.0.0/24"

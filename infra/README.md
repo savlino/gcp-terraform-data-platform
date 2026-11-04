@@ -73,8 +73,9 @@ not by this root or CI-managed child modules.
   per-file autodetected raw load stages, not a shared external table.
   The separate `sql_tests` dataset is controlled by `enable_sql_test_dataset`
   (DEV true; TEST/PROD false). Its only grant, Data Editor for the bootstrap
-  `ci-sqltest-dev` account, is set by `sql_test_principal`, which must be set
-  exactly when the dataset is enabled. Apply bootstrap first; see the security
+  `ci-sqltest-dev` account, is set by optional `sql_test_principal` as
+  `serviceAccount:<bootstrap sqltest_sa_email>`. Null creates no grant; a
+  disabled dataset creates neither the dataset nor its grant. Apply bootstrap first; see the security
   guide.
   See [schema migration](../docs/runbook.md#per-file-schema-migration) before
   applying the external-table removal and curated latency type change.

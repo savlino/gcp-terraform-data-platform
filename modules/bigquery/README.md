@@ -14,12 +14,14 @@ the [IAM module](../iam/README.md).
 | `deletion_protection` | Prevent Terraform table deletion | `true` |
 | `delete_contents_on_destroy` | Allow dataset deletion with contents | `false` |
 | `enable_sql_test_dataset` | Create the disposable SQL test dataset | `false` |
-| `sql_test_principal` | SA email granted Data Editor on `sql_tests` only; ignored when the dataset is disabled | `null` |
+| `sql_test_principal` | `serviceAccount:name@project.iam.gserviceaccount.com` IAM member granted Data Editor on `sql_tests` only; ignored when the dataset is disabled | `null` |
 
 Outputs: `dataset_id`, `sql_test_dataset_id` (null when disabled), `table_ids`.
 
 When enabled, `sql_tests` has a one-hour default table expiration, the standard
-environment labels and `delete_contents_on_destroy = true`. The Google
+environment labels, explicit `deletion_policy = "DELETE"` (holds no real data)
+and `delete_contents_on_destroy = true`. Tables here are created by tests, not
+by Terraform. A null principal creates the dataset without an IAM grant. The Google
 BigQuery dataset resource has no table-style `deletion_protection` field; this
 is intentionally a disposable dataset and must not hold real data. The grant is
 in this module, next to the dataset, because bootstrap is applied before infra

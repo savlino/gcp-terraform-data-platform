@@ -122,12 +122,12 @@ variable "enable_sql_test_dataset" {
 
 variable "sql_test_principal" {
   type        = string
-  description = "Email of the bootstrap ci-sqltest-dev service account (output ci_sqltest_dev_service_account); granted Data Editor on sql_tests only. Required when enable_sql_test_dataset is true, null otherwise."
+  description = "Service account IAM member (serviceAccount:<bootstrap sqltest_sa_email>) granted Data Editor on sql_tests only; null for no grant. Ignored when the dataset is disabled."
   default     = null
 
   validation {
-    condition     = (var.sql_test_principal != null) == var.enable_sql_test_dataset
-    error_message = "sql_test_principal must be set exactly when enable_sql_test_dataset is true (DEV), and null otherwise."
+    condition     = var.sql_test_principal == null ? true : can(regex("^serviceAccount:[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", var.sql_test_principal))
+    error_message = "sql_test_principal must be null or a serviceAccount:name@project.iam.gserviceaccount.com IAM member."
   }
 }
 

@@ -1,5 +1,4 @@
 locals {
-  ci_projects     = { for env in var.ci_environments : env => local.projects[env] }
   sql_test_access = var.enable_sql_test_access ? { dev = var.dev_project_id } : {}
   wif_pool        = "projects/${data.google_project.projects["ops"].number}/locations/global/workloadIdentityPools/gitlab"
   wif_provider    = "${local.wif_pool}/providers/gitlab-com"
@@ -28,11 +27,11 @@ locals {
     "roles/secretmanager.admin",
   ])
   ci_plan_grants = {
-    for pair in setproduct(var.ci_environments, local.ci_plan_roles) :
+    for pair in setproduct(toset(keys(local.ci_environments)), local.ci_plan_roles) :
     "${pair[0]}/${pair[1]}" => { env = pair[0], role = pair[1] }
   }
   ci_apply_grants = {
-    for pair in setproduct(var.ci_environments, local.ci_apply_roles) :
+    for pair in setproduct(toset(keys(local.ci_environments)), local.ci_apply_roles) :
     "${pair[0]}/${pair[1]}" => { env = pair[0], role = pair[1] }
   }
   human_grants = var.developer_principal == null ? {} : {
@@ -78,7 +77,7 @@ resource "google_iam_workload_identity_pool_provider" "gitlab_com" {
 }
 
 resource "google_service_account" "ci_plan" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   project      = var.ops_project_id
   account_id   = "ci-plan-${each.key}"
@@ -89,7 +88,7 @@ resource "google_service_account" "ci_plan" {
 }
 
 resource "google_service_account" "ci_apply" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   project      = var.ops_project_id
   account_id   = "ci-apply-${each.key}"
@@ -104,8 +103,8 @@ resource "google_service_account" "ci_sqltest_dev" {
 
   project      = var.ops_project_id
   account_id   = "ci-sqltest-dev"
-  display_name = "dev-ci-sqltest"
-  description  = "GitLab SQL integration test identity; BigQuery job submission in DEV, data access granted by infra on sql_tests only."
+  display_name = "dev-ci-sqltest: runs SQL tests in DEV"
+  description  = "GitLab CI identity that runs SQL integration tests in DEV. BigQuery Job User on the DEV project only; Data Editor on sql_tests is granted by infra (sql_test_principal)."
 
   depends_on = [google_project_service.apis]
 }
@@ -113,7 +112,7 @@ resource "google_service_account" "ci_sqltest_dev" {
 resource "google_project_iam_member" "ci_plan" {
   for_each = local.ci_plan_grants
 
-  project = local.ci_projects[each.value.env]
+  project = local.ci_environments[each.value.env]
   role    = each.value.role
   member  = "serviceAccount:${google_service_account.ci_plan[each.value.env].email}"
 }
@@ -121,7 +120,7 @@ resource "google_project_iam_member" "ci_plan" {
 resource "google_project_iam_member" "ci_apply" {
   for_each = local.ci_apply_grants
 
-  project = local.ci_projects[each.value.env]
+  project = local.ci_environments[each.value.env]
   role    = each.value.role
   member  = "serviceAccount:${google_service_account.ci_apply[each.value.env].email}"
 }
@@ -135,7 +134,7 @@ resource "google_project_iam_member" "ci_sqltest_dev_job_user" {
 }
 
 resource "google_storage_bucket_iam_member" "ci_plan_state" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   bucket = google_storage_bucket.terraform_state.name
   role   = "roles/storage.objectUser"
@@ -143,7 +142,7 @@ resource "google_storage_bucket_iam_member" "ci_plan_state" {
 }
 
 resource "google_storage_bucket_iam_member" "ci_apply_state" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   bucket = google_storage_bucket.terraform_state.name
   role   = "roles/storage.objectUser"
@@ -151,7 +150,7 @@ resource "google_storage_bucket_iam_member" "ci_apply_state" {
 }
 
 resource "google_service_account_iam_member" "plan_federation" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   service_account_id = google_service_account.ci_plan[each.key].name
   role               = "roles/iam.workloadIdentityUser"
@@ -161,7 +160,7 @@ resource "google_service_account_iam_member" "plan_federation" {
 }
 
 resource "google_service_account_iam_member" "apply_federation" {
-  for_each = local.ci_projects
+  for_each = local.ci_environments
 
   service_account_id = google_service_account.ci_apply[each.key].name
   role               = "roles/iam.workloadIdentityUser"

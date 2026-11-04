@@ -33,7 +33,7 @@ run "dev_sql_test_dataset_enabled" {
   command = plan
   variables {
     enable_sql_test_dataset = true
-    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
   }
   assert {
     condition     = output.sql_test_dataset_id == "sql_tests"
@@ -46,25 +46,58 @@ run "reject_sql_test_dataset_outside_dev" {
   variables {
     env                     = "test"
     enable_sql_test_dataset = true
-    sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
   }
   expect_failures = [var.enable_sql_test_dataset]
 }
 
-run "reject_sql_test_dataset_without_principal" {
+run "sql_test_dataset_without_principal" {
   command = plan
   variables {
     enable_sql_test_dataset = true
   }
-  expect_failures = [var.sql_test_principal]
+  assert {
+    condition     = output.sql_test_dataset_id == "sql_tests"
+    error_message = "A null principal must not prevent creation of the enabled DEV SQL test dataset."
+  }
 }
 
-run "reject_sql_test_principal_without_dataset" {
+run "sql_test_principal_without_dataset" {
   command = plan
   variables {
     env                     = "test"
     enable_sql_test_dataset = false
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  assert {
+    condition     = output.sql_test_dataset_id == null
+    error_message = "A principal must not enable the SQL test dataset when its flag is false."
+  }
+}
+
+run "reject_sql_test_bare_email" {
+  command = plan
+  variables {
+    enable_sql_test_dataset = true
     sql_test_principal      = "ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com"
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
+run "reject_sql_test_human_principal" {
+  command = plan
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "user:someone@example.com"
+  }
+  expect_failures = [var.sql_test_principal]
+}
+
+run "reject_sql_test_non_service_account_domain" {
+  command = plan
+  variables {
+    enable_sql_test_dataset = true
+    sql_test_principal      = "serviceAccount:ci-sqltest-dev@example.com"
   }
   expect_failures = [var.sql_test_principal]
 }

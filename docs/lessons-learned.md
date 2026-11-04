@@ -207,6 +207,9 @@ data provider's documentation and shaped the design.
   the plan-JSON scan in CI (`scripts/check_plan.py`, next section) covers that gap.
 - **Docs:** https://developer.hashicorp.com/terraform/language/tests
 
+### Resource-existence inputs must fail closed
+- Values that determine whether resources exist are derived from code. If a value must be provided, its absence must be an error, not a default value.
+
 ## Plan policy in CI
 
 ### The policy check caught perpetual drift that looked like a normal plan

@@ -119,7 +119,7 @@ state and must not be committed. Local synthetic checks do not verify a live MR.
 | Same runtime | `roles/secretmanager.secretAccessor` | Environment `alert-telegram` secret only | Read the Telegram alert config (bot token, chat ID); no version creation or project-wide secret access. |
 | `ci-sqltest-dev` (ops project) | `roles/bigquery.dataEditor` | DEV `sql_tests` dataset only; granted by **infra** (`sql_test_principal`) | Write disposable SQL integration fixtures; the dataset is enabled only in DEV and tables expire after one hour. No access to `network_perf`, buckets or secrets. |
 | Same SQL test CI identity | `roles/bigquery.jobUser` | DEV project; granted by **bootstrap** | Submit BigQuery jobs; this is its only project-level role. WIF trusts only the configured GitLab `project_path`. |
-| Bootstrap `developer_principal` | `roles/iam.serviceAccountTokenCreator` | DEV and TEST projects only | Optional human local impersonation; broad across all SAs in those projects, not ops CI accounts. Absent by default and never granted in PROD. |
+| Bootstrap `developer_principal` | `roles/iam.serviceAccountTokenCreator` | DEV and TEST projects only | Explicit user principal or null is required; broad across all SAs in those projects, not ops CI accounts. Null disables access; never granted in PROD. |
 | `ingest-scheduler@<project_id>.iam.gserviceaccount.com` | `roles/run.invoker` | Environment Cloud Run job only, when enabled | OAuth-authenticated Scheduler launch; no data, secret or runtime impersonation grants. |
 | Same bootstrap human | `roles/iap.tunnelResourceAccessor` | DEV and TEST projects only, independent of VM flag | Deliberate tunnel authorization, even if inherited Owner access already exists. No explicit OS Login grant is managed by this repo. |
 | DEV/TEST/PROD Cloud Run service agents (`service-<project-number>@serverless-robot-prod.iam.gserviceaccount.com`) | `roles/artifactregistry.reader` | Shared ops `ops-ingest` repository only | Bootstrap generates all three service identities and authorizes cross-project image pulls; no registry role on runtime SAs. |
@@ -191,8 +191,8 @@ The provider condition compares `assertion.project_path` to the configured
 `gitlab_project_path`. GitLab MR tokens identify the source project, so fork
 tokens do not satisfy this trust. Cloud plan jobs also exclude fork MRs.
 
-`ci-plan-<env>` and `ci-apply-<env>` live in ops; `ci_environments = ["dev"]`
-is the default. Each SA receives additive `roles/iam.workloadIdentityUser`:
+`ci-plan-<env>` and `ci-apply-<env>` live in ops for every environment project
+in `local.projects` except ops. Each SA receives additive `roles/iam.workloadIdentityUser`:
 
 - Plan: `principalSet://iam.googleapis.com/projects/<ops-number>/locations/global/workloadIdentityPools/gitlab/attribute.project_path/<path>`.
 - Apply: `principalSet://iam.googleapis.com/projects/<ops-number>/locations/global/workloadIdentityPools/gitlab/attribute.ref_protected/true`.
@@ -211,10 +211,11 @@ cannot grant on a dataset that does not exist yet:
   service account in ops, its WIF trust for the configured project path, and
   project-level `roles/bigquery.jobUser` on DEV.
 - **infra** (DEV only): the `sql_tests` dataset and
-  `roles/bigquery.dataEditor` on that dataset for the email in
-  `sql_test_principal`. A validation requires `sql_test_principal` exactly when
-  `enable_sql_test_dataset` is true, so TEST/PROD cannot carry the grant, and
-  accepts only a service-account email.
+  `roles/bigquery.dataEditor` on that dataset for the IAM member in
+  `sql_test_principal` (`serviceAccount:<bootstrap sqltest_sa_email>`).
+  Validation accepts null or a service-account IAM member. Null creates no
+  grant; a disabled dataset creates no grant even if a principal is supplied.
+  The dataset flag is restricted to DEV, so TEST/PROD cannot carry the grant.
 
 Order: apply bootstrap with the flag first, then DEV infra; an infra apply
 that grants a not-yet-existing account fails. The identity receives no
@@ -225,7 +226,8 @@ the bootstrap flag.
 The `sql_tests` dataset exists only when `enable_sql_test_dataset = true`
 (true in DEV tfvars; false in TEST/PROD). It has standard environment labels
 and a one-hour default table expiration. BigQuery datasets do not expose the
-table-level `deletion_protection` setting; this disposable dataset sets
+table-level `deletion_protection` setting; this disposable dataset explicitly
+sets `deletion_policy = "DELETE"` (holds no real data) and
 `delete_contents_on_destroy = true` so Terraform may remove test tables with
 the dataset. Do not store production or user data there.
 

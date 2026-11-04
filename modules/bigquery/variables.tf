@@ -38,11 +38,11 @@ variable "enable_sql_test_dataset" {
 
 variable "sql_test_principal" {
   type        = string
-  description = "Service account email granted roles/bigquery.dataEditor on sql_tests only; null for no grant. Ignored when the dataset is disabled."
+  description = "Service account IAM member (serviceAccount:name@project.iam.gserviceaccount.com) granted roles/bigquery.dataEditor on sql_tests only; null for no grant. Ignored when the dataset is disabled."
   default     = null
 
   validation {
-    condition     = var.sql_test_principal == null ? true : can(regex("^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", var.sql_test_principal))
-    error_message = "sql_test_principal must be null or a user-managed service account email (name@project.iam.gserviceaccount.com) without a member prefix."
+    condition     = var.sql_test_principal == null ? true : can(regex("^serviceAccount:[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\\.iam\\.gserviceaccount\\.com$", var.sql_test_principal))
+    error_message = "sql_test_principal must be null or a serviceAccount:name@project.iam.gserviceaccount.com IAM member."
   }
 }

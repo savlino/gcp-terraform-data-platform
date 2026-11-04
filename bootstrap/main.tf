@@ -6,6 +6,8 @@ locals {
     prod = var.prod_project_id
   }
 
+  ci_environments = { for name, project in local.projects : name => project if name != "ops" }
+
   shared_apis = toset([
     "cloudresourcemanager.googleapis.com",
     "serviceusage.googleapis.com",

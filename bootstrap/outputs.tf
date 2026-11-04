@@ -33,7 +33,7 @@ output "ci_apply_service_accounts" {
   value       = { for env, account in google_service_account.ci_apply : env => account.email }
 }
 
-output "ci_sqltest_dev_service_account" {
+output "sqltest_sa_email" {
   description = "Ops-project DEV SQL test CI service account email (infra sql_test_principal); null until enabled."
   value       = try(google_service_account.ci_sqltest_dev["dev"].email, null)
 }

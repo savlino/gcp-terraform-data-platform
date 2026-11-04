@@ -49,6 +49,11 @@ override_resource {
 variables {
   billing_account_id  = "000000-000000-000000"
   gitlab_project_path = "savlino/gcp-terraform-data-platform"
+
+  # Keep deployment TF_VAR_* values out of the access-control scenarios.
+  developer_principal       = null
+  human_access_environments = ["dev", "test"]
+  enable_sql_test_access    = false
 }
 
 run "shared_ops_registry" {
@@ -92,12 +97,12 @@ run "shared_ops_registry" {
       length(toset(values(output.cloud_run_service_agents))) == 3 &&
       output.cloud_run_service_agents["prod"] == "service-333333333333@serverless-robot-prod.iam.gserviceaccount.com"
     )
-    error_message = "All three distinct Cloud Run agents, including PROD with DEV-only CI, need repository-scoped Reader."
+    error_message = "All three distinct Cloud Run agents need repository-scoped Reader."
   }
 
   assert {
     condition = (
-      toset(keys(google_artifact_registry_repository_iam_member.ci_apply_reader)) == toset(["dev"]) &&
+      toset(keys(google_artifact_registry_repository_iam_member.ci_apply_reader)) == toset(["dev", "test", "prod"]) &&
       google_artifact_registry_repository_iam_member.ci_apply_reader["dev"].role == "roles/artifactregistry.reader" &&
       google_artifact_registry_repository_iam_member.ci_apply_reader["dev"].member == "serviceAccount:${google_service_account.ci_apply["dev"].email}" &&
       alltrue([for grant in google_project_iam_member.ci_apply : grant.role != "roles/artifactregistry.admin"])

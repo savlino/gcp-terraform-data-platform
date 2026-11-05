@@ -30,7 +30,7 @@ SELECT
   MIN(CASE WHEN outlier_rows THEN COALESCE(quadkey, '<NULL>') END) AS outlier_rows_example,
   COUNTIF(null_down_rows) AS null_down_rows,
   MIN(CASE WHEN null_down_rows THEN COALESCE(quadkey, '<NULL>') END) AS null_down_rows_example,
-  (SELECT COUNT(*) FROM `{dataset}.ookla_tiles`
+  (SELECT COUNT(*) FROM `{ookla_tiles}`
    WHERE quarter_start = DATE_SUB(@quarter_start, INTERVAL 3 MONTH)
      AND network_type = @network_type) AS previous_rows,
   (SELECT COUNT(*) FROM `{raw_stage}`) AS source_rows

@@ -2,6 +2,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -15,6 +16,8 @@ from ingest.quality import QualityError, QualityResult, evaluate
 
 LOGGER = logging.getLogger(__name__)
 RAW_KEY = re.compile(r"ookla/type=(mobile|fixed)/year=([0-9]{4})/quarter=([1-4])/[^/]+\.parquet")
+TARGET_TABLES = ("ookla_tiles", "load_log", "mart_quarterly_performance")
+TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,1023}")
 
 
 class BuildError(RuntimeError):
@@ -87,12 +90,31 @@ def raw_partitions(
     return sorted(found.values(), key=lambda p: (p.year, p.quarter, p.network_type))
 
 
-def sql(name: str, dataset: str, stage: str = "", raw_stage: str = "") -> str:
+def sql(
+    name: str,
+    dataset: str,
+    stage: str = "",
+    raw_stage: str = "",
+    tables: Mapping[str, str] | None = None,
+) -> str:
+    """Render a production SQL file; `tables` renames target tables inside `dataset`."""
+    names = {table: table for table in TARGET_TABLES}
+    for table, override in (tables or {}).items():
+        if table not in names:
+            raise ValueError(f"Unknown target table: {table}")
+        if not TABLE_NAME.fullmatch(override):
+            raise ValueError(f"Invalid table name for {table}: {override!r}")
+        names[table] = override
     return (
         files("ingest")
         .joinpath("sql", name + ".sql")
         .read_text(encoding="utf-8")
-        .format(dataset=dataset, stage=stage, raw_stage=raw_stage)
+        .format(
+            dataset=dataset,
+            stage=stage,
+            raw_stage=raw_stage,
+            **{table: f"{dataset}.{value}" for table, value in names.items()},
+        )
     )
 
 
@@ -139,6 +161,17 @@ def partition_parameters(
             ("max_lat", "FLOAT64", max_lat),
             ("latency_ceiling", "FLOAT64", settings.latency_ceiling_ms),
         )
+    ]
+
+
+def mart_parameters(
+    settings: BuildConfig, loaded_at: datetime
+) -> list[bigquery.ScalarQueryParameter]:
+    return [
+        bigquery.ScalarQueryParameter("all_start", "DATE", date.min),
+        bigquery.ScalarQueryParameter("mart_zoom", "INT64", settings.mart_zoom),
+        bigquery.ScalarQueryParameter("latency_ceiling", "FLOAT64", settings.latency_ceiling_ms),
+        bigquery.ScalarQueryParameter("loaded_at", "TIMESTAMP", loaded_at),
     ]
 
 
@@ -288,14 +321,7 @@ def build(
             bq,
             settings,
             sql("mart", dataset),
-            [
-                bigquery.ScalarQueryParameter("all_start", "DATE", date.min),
-                bigquery.ScalarQueryParameter("mart_zoom", "INT64", settings.mart_zoom),
-                bigquery.ScalarQueryParameter(
-                    "latency_ceiling", "FLOAT64", settings.latency_ceiling_ms
-                ),
-                bigquery.ScalarQueryParameter("loaded_at", "TIMESTAMP", datetime.now(UTC)),
-            ],
+            mart_parameters(settings, datetime.now(UTC)),
             collect=False,
         )
     except Exception as error:

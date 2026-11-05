@@ -218,7 +218,26 @@ cannot grant on a dataset that does not exist yet:
   The dataset flag is restricted to DEV, so TEST/PROD cannot carry the grant.
 
 Order: apply bootstrap with the flag first, then DEV infra; an infra apply
-that grants a not-yet-existing account fails. The identity receives no
+that grants a not-yet-existing account fails.
+
+CI use of the DEV identities:
+
+- `test:sql` impersonates `ci-sqltest-dev` on **every same-project MR** and on
+  `main`. MR code runs with that identity, so a developer can run arbitrary
+  BigQuery jobs billed to DEV. The `maximum_bytes_billed` limit is in the test
+  code, not enforced by IAM. Residual risk accepted for a single-maintainer
+  project; a BigQuery custom quota on DEV would enforce a limit.
+- `verify:dev` uses `ci-apply-dev` (protected refs only) to execute the DEV
+  Cloud Run job and query BigQuery. That identity has broad deployment roles
+  (for example BigQuery and Cloud Run admin); verify needs only
+  `run.jobs.runWithOverrides` on `dev-ingest` and read/job access on
+  `network_perf`. A dedicated verify identity is not implemented.
+
+Both CI jobs write the WIF credential configuration with the image-agnostic
+`.gcp_auth` template: the same `external_account` file `gcloud
+create-cred-config` writes, at `.ci-auth/wif.json`, removed in `after_script`.
+
+`ci-sqltest-dev` receives no
 state-bucket, raw-bucket, `network_perf` or Secret Manager grant. To remove
 it, disable the dataset in infra first (which removes the dataset grant), then
 the bootstrap flag.

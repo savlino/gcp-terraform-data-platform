@@ -1,7 +1,7 @@
 BEGIN TRANSACTION;
-DELETE FROM `{dataset}.mart_quarterly_performance`
+DELETE FROM `{mart_quarterly_performance}`
 WHERE quarter_start >= @all_start;
-INSERT INTO `{dataset}.mart_quarterly_performance`
+INSERT INTO `{mart_quarterly_performance}`
   (network_type, quarter_start, quadkey_prefix, avg_d_mbps, avg_u_mbps,
    avg_lat_ms, avg_lat_down_ms, avg_lat_up_ms, tile_count, total_tests,
    download_qoq_pct, loaded_at)
@@ -26,7 +26,7 @@ WITH weighted AS (
                        AND NOT IS_NAN(avg_lat_up_ms) AND NOT IS_INF(avg_lat_up_ms),
                        tests, 0))) AS avg_lat_up_ms,
     COUNT(*) AS tile_count, SUM(tests) AS total_tests
-  FROM `{dataset}.ookla_tiles`
+  FROM `{ookla_tiles}`
   WHERE quarter_start >= @all_start
   GROUP BY network_type, quarter_start, quadkey_prefix
 )

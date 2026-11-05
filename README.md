@@ -45,7 +45,11 @@ the same artifact; when omitted, the immutable `image_tag` is used.
 ## CI/CD
 [GitLab configuration](.gitlab-ci.yml) defines pinned lint/test jobs, plan+policy
 for DEV/TEST/PROD on MR and `main`, and manual apply promotion on `main` only
-(`apply:dev`, then `apply:test`, then `apply:prod`). An optional unprotected-ref
+(`apply:dev`, then `apply:test`, then `apply:prod`). After `apply:dev`, an automatic
+`verify:dev` job forces a mobile build of one INT32-era and one DOUBLE-era quarter on
+DEV and must pass before `apply:test` (stage `promote`). `test:sql` runs the BigQuery
+SQL tests against DEV `sql_tests` on MRs and `main`. Both are configured; first
+pipeline run pending. An optional unprotected-ref
 denial check remains available. On GitLab Free there are no protected environments
 or deployment approvals; this repository uses protected `main`, manual jobs and
 `needs` ordering as the gate. Configure the non-secret ops project number, protected
@@ -58,12 +62,25 @@ single member, and plan files can include resource attribute values.
 TODO: Document the implemented identity, access, and secret-handling controls.
 
 ## Testing
+| Level | Where | Status |
+| --- | --- | --- |
+| Terraform fmt/validate/tflint, mocked `terraform test` | CI | Configured |
+| Plan policy P0-P13 (`check_plan.py`) | CI and `scripts/tf.ps1` | Configured |
+| Python unit tests | CI | Configured |
+| BigQuery SQL tests | CI `test:sql`, DEV | Configured; first run pending |
+| Post-deploy regression | CI `verify:dev`, DEV | Configured; first run pending |
+
+How to run each level, mutation checks and their results: [docs/testing.md](docs/testing.md).
+Why the wrapper and policy rules exist: [2026-10-29 incident](docs/incidents/2026-10-29-cross-env-plan.md).
+Lessons: [docs/lessons-learned.md](docs/lessons-learned.md#testing-lessons).
+
 The [testing matrix](docs/testing.md) separates local/mocked CI checks from
-proposed checks that need DEV. Current CI runs Terraform format/validation,
+DEV-backed checks. Current CI runs Terraform format/validation,
 TFLint, mocked Terraform tests, Ruff, Python unit tests, plan policy checks,
-and per-environment plans. SQL tests currently use local synthetic SQLite
-fixtures; BigQuery-backed SQL integration and post-`apply:dev` schema-era
-regression jobs are **not configured yet**. No live GCP test is claimed.
+and per-environment plans. Configured but not yet run in a pipeline:
+`test:sql` (production SQL on synthetic data in DEV BigQuery) and `verify:dev`
+(post-`apply:dev` forced builds for both source schema eras). Local SQLite SQL
+tests also run in CI. No live GCP test is claimed.
 
 ## Cost and teardown
 Initial storage estimate for Artifact Registry image retention: [docs/cost.md](docs/cost.md).
@@ -76,6 +93,7 @@ TODO: Add verified setup and deployment instructions.
 - Verified populated curated tables/marts and live transformation/quality behavior.
 - Verified Cloud Run/Scheduler, private-network/IAP, live WIF and pipeline execution (including apply promotion), and distributed application execution locking. CI identities are configuration only until bootstrap is applied. Backend prefixes do not isolate shared state-bucket access. Cloud Run VPC attachment is intentionally absent.
 - Verified Telegram delivery, provisioned secret values, automated token rotation and the optional Terraform write-only secret-version path.
+- A dedicated least-privilege identity for `verify:dev` (it uses the broad `ci-apply-dev`), and an IAM-enforced BigQuery cost cap for `test:sql` on MRs (the byte limit lives in test code).
 - Verified DEV deployment. No dataset default table expiration is configured.
 
 ## Data attribution

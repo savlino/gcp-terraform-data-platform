@@ -146,3 +146,36 @@ def test_stage_casts_every_numeric_source_column_to_native_type(schema_path):
         assert numeric[name] == "FLOAT64"
     assert "CAST(avg_d_kbps AS FLOAT64) / 1000 AS avg_d_mbps" in rendered
     assert "CAST(avg_u_kbps AS FLOAT64) / 1000 AS avg_u_mbps" in rendered
+
+
+def test_sql_default_target_tables_are_unchanged():
+    assert "`project.dataset.ookla_tiles`" in sql("mart", "project.dataset")
+    assert "`project.dataset.mart_quarterly_performance`" in sql("mart", "project.dataset")
+    assert "`project.dataset.load_log`" in sql("watermarks", "project.dataset")
+
+
+def test_sql_renames_every_target_table_in_the_same_dataset():
+    tables = {
+        "ookla_tiles": "t1_ookla_tiles",
+        "load_log": "t1_load_log",
+        "mart_quarterly_performance": "t1_mart",
+    }
+    rendered = "\n".join(
+        sql(name, "project.sql_tests", "stage", "raw", tables)
+        for name in ("quality", "publish", "mart", "verify_mart", "watermarks")
+    )
+    for value in tables.values():
+        assert f"`project.sql_tests.{value}`" in rendered
+    assert "{" + "dataset" + "}" not in rendered
+    assert "`project.sql_tests.ookla_tiles`" not in rendered
+    assert "`project.sql_tests.load_log`" not in rendered
+    assert "`project.sql_tests.mart_quarterly_performance`" not in rendered
+
+
+@pytest.mark.parametrize(
+    "tables",
+    [{"unknown": "t1"}, {"ookla_tiles": "other.dataset.table"}, {"load_log": "bad`name"}],
+)
+def test_sql_rejects_unknown_or_unsafe_table_names(tables):
+    with pytest.raises(ValueError):
+        sql("publish", "project.dataset", "stage", tables=tables)

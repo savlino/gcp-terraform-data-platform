@@ -4,7 +4,9 @@ workflow:
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
     - when: never
 
-stages: [lint, test, plan, policy, apply]
+# `needs` may only point to jobs in the same or an earlier stage. apply:test needs
+# verify:dev (stage verify, after apply), so later environments apply in `promote`.
+stages: [lint, test, plan, policy, apply, verify, promote]
 
 variables:
   TF_IN_AUTOMATION: "true"
@@ -12,6 +14,9 @@ variables:
   TF_VERSION: "1.16.5"
   GCP_OPS_PROJECT_ID: "dep-2610-ops"
   TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.terraform-plugin-cache"
+  # verify:dev rebuilds one quarter per source schema era (see docs/testing.md).
+  VERIFY_QUARTER_INT32: "2025-Q4"
+  VERIFY_QUARTER_DOUBLE: "2026-Q2"
 
 default:
   interruptible: true
@@ -74,10 +79,10 @@ python:lint-test:
 
 .wif:
   extends: .terraform
-  image:
+  image: &gcloud_image
     name: gcr.io/google.com/cloudsdktool/google-cloud-cli:588.0.0-stable
     entrypoint: [""]
-  id_tokens:
+  id_tokens: &wif_id_tokens
     GITLAB_OIDC_TOKEN:
       aud: "https://iam.googleapis.com/projects/${GCP_OPS_PROJECT_NUMBER}/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com"
   variables:
@@ -116,6 +121,61 @@ python:lint-test:
     - rm -f "$CI_PROJECT_DIR/.ci-auth/token" "$CI_PROJECT_DIR/.ci-auth/wif.json" "$CI_PROJECT_DIR/.ci-auth/plan.json" "$CI_PROJECT_DIR/.ci-auth/auth.log"
     - rm -rf "$CI_PROJECT_DIR/.ci-auth/gcloud"
 
+# WIF credentials without gcloud or Terraform, so any image can use them (python:3.12-slim).
+# Writes the same files as .wif and reuses its cleanup.
+.gcp_auth:
+  id_tokens: *wif_id_tokens
+  before_script:
+    - |
+      set -eu
+      : "${GCP_OPS_PROJECT_NUMBER:?Set the non-secret ops project number in GitLab}"
+      case "$GCP_OPS_PROJECT_NUMBER" in *[!0-9]*|"") exit 1 ;; esac
+      mkdir -p "$CI_PROJECT_DIR/.ci-auth"
+      chmod 700 "$CI_PROJECT_DIR/.ci-auth"
+      export CLOUDSDK_CONFIG="$CI_PROJECT_DIR/.ci-auth/gcloud"
+      export GOOGLE_APPLICATION_CREDENTIALS="$CI_PROJECT_DIR/.ci-auth/wif.json"
+      umask 077
+      printf '%s' "$GITLAB_OIDC_TOKEN" > "$CI_PROJECT_DIR/.ci-auth/token"
+      unset GITLAB_OIDC_TOKEN
+      CI_SA_EMAIL="ci-${CI_SA_KIND}-${CI_ENV}@${GCP_OPS_PROJECT_ID}.iam.gserviceaccount.com"
+      # Same external_account format that `gcloud iam workload-identity-pools create-cred-config` writes.
+      printf '%s\n' \
+        '{' \
+        '  "universe_domain": "googleapis.com",' \
+        '  "type": "external_account",' \
+        "  \"audience\": \"//iam.googleapis.com/projects/${GCP_OPS_PROJECT_NUMBER}/locations/global/workloadIdentityPools/gitlab/providers/gitlab-com\"," \
+        '  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",' \
+        '  "token_url": "https://sts.googleapis.com/v1/token",' \
+        "  \"service_account_impersonation_url\": \"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${CI_SA_EMAIL}:generateAccessToken\"," \
+        "  \"credential_source\": {\"file\": \"$CI_PROJECT_DIR/.ci-auth/token\"}" \
+        '}' > "$GOOGLE_APPLICATION_CREDENTIALS"
+      echo "WIF credentials for $CI_SA_EMAIL"
+  after_script: !reference [.wif, after_script]
+
+test:sql:
+  extends: .gcp_auth
+  stage: test
+  image: python:3.12-slim
+  interruptible: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID == $CI_PROJECT_ID'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  variables:
+    CI_ENV: "dev"
+    CI_SA_KIND: "sqltest"      # ci-sqltest-dev: jobUser on DEV + dataEditor on sql_tests only
+    SQL_TEST_DATASET: "dep-2610-dev.sql_tests"
+  script:
+    - python -m pip install --no-cache-dir -e "./app[dev]"
+    - pytest -m sql app/tests/sql --junitxml=sql-junit.xml
+    # The tests skip when SQL_TEST_DATASET is missing; in CI a skip is a failure, not a green job.
+    - |
+      grep -q 'skipped="0"' sql-junit.xml || { echo "ERROR: SQL tests were skipped; check SQL_TEST_DATASET"; exit 1; }
+  artifacts:
+    when: always
+    access: maintainer
+    expire_in: 1 day
+    reports:
+      junit: sql-junit.xml
 .plan:
   extends: .wif
   stage: plan
@@ -222,14 +282,70 @@ apply:dev:
     - job: policy:dev
       artifacts: false
 
+# Post-apply regression: forced mobile rebuild for one quarter per source schema era.
+# Mutates curated DEV data for those quarters; raw files must already be in the DEV raw bucket.
+verify:dev:
+  extends: .gcp_auth
+  stage: verify
+  image: *gcloud_image
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs:
+    - job: apply:dev
+      artifacts: false
+  interruptible: false
+  resource_group: dev            # one verify run at a time; distinct from terraform-dev so plans are not blocked
+  variables:
+    CI_ENV: "dev"
+    CI_SA_KIND: "apply"          # ci-apply-dev: protected refs only
+    VERIFY_PROJECT: "dep-2610-dev"
+    VERIFY_REGION: "europe-southwest1"
+    VERIFY_JOB: "dev-ingest"
+    VERIFY_DATASET: "network_perf"
+    VERIFY_MAX_BYTES: "104857600"
+  script:
+    - gcloud auth login --cred-file="$GOOGLE_APPLICATION_CREDENTIALS" --quiet
+    - |
+      set -eu
+      for quarter in "$VERIFY_QUARTER_INT32" "$VERIFY_QUARTER_DOUBLE"; do
+        case "$quarter" in
+          [0-9][0-9][0-9][0-9]-Q[1-4]) ;;
+          *) echo "FAIL: quarter '$quarter' must use YYYY-QN"; exit 1 ;;
+        esac
+        year=${quarter%-Q*}
+        q=${quarter#*-Q}
+        quarter_start=$(printf '%s-%02d-01' "$year" $(( (q - 1) * 3 + 1 )))
+        echo "== $quarter (quarter_start=$quarter_start): forced mobile build"
+        gcloud run jobs execute "$VERIFY_JOB" --project="$VERIFY_PROJECT" --region="$VERIFY_REGION" \
+          "--args=build,--type,mobile,--quarter,$quarter,--force" --wait
+        result=$(bq --headless --quiet --format=csv --project_id="$VERIFY_PROJECT" --location="$VERIFY_REGION" \
+          query --use_legacy_sql=false --maximum_bytes_billed="$VERIFY_MAX_BYTES" \
+          --parameter="quarter_start:DATE:$quarter_start" \
+          "SELECT
+             (SELECT COUNT(*) FROM \`$VERIFY_PROJECT.$VERIFY_DATASET.load_log\`
+              WHERE network_type = 'mobile' AND quarter_start = @quarter_start AND status = 'SUCCESS'
+                AND loaded_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE)) AS fresh_success,
+             (SELECT COUNT(*) FROM \`$VERIFY_PROJECT.$VERIFY_DATASET.ookla_tiles\`
+              WHERE quarter_start = @quarter_start AND network_type = 'mobile') AS tile_rows" | tail -n 1)
+        fresh_success=${result%%,*}
+        tile_rows=${result#*,}
+        echo "load_log fresh SUCCESS rows=$fresh_success; ookla_tiles rows=$tile_rows"
+        case "$fresh_success$tile_rows" in *[!0-9]*|"") echo "FAIL: unexpected bq output: $result"; exit 1 ;; esac
+        [ "$fresh_success" -ge 1 ] || { echo "FAIL: no SUCCESS load_log row for mobile $quarter in the last 30 minutes"; exit 1; }
+        [ "$tile_rows" -ge 1 ] || { echo "FAIL: ookla_tiles has no mobile rows for $quarter"; exit 1; }
+        echo "PASS: $quarter"
+      done
 apply:test:
   extends: .apply
+  stage: promote               # must follow stage verify: it needs verify:dev
   variables: {CI_ENV: "test", CI_SA_KIND: "apply"}
   resource_group: terraform-test
   environment:
     name: test
   needs:
-    - job: apply:dev           # promotion order: dev must succeed first
+    - job: apply:dev           # promotion order: dev must apply and verify first
+      artifacts: false
+    - job: verify:dev
       artifacts: false
     - job: plan:test
       artifacts: true
@@ -238,6 +354,7 @@ apply:test:
 
 apply:prod:
   extends: .apply
+  stage: promote
   variables: {CI_ENV: "prod", CI_SA_KIND: "apply"}
   resource_group: terraform-prod
   environment:

@@ -210,6 +210,38 @@ data provider's documentation and shaped the design.
 ### Resource-existence inputs must fail closed
 - Values that determine whether resources exist are derived from code. If a value must be provided, its absence must be an error, not a default value.
 
+## Testing lessons
+
+### Test SQL on the real engine and the real files
+- SQLite tests passed while BigQuery behaved differently (syntax, casts, NULL
+  handling, INT32 vs DOUBLE Parquet). Production SQL files are now rendered by
+  the production code and run in BigQuery on synthetic Parquet of both source
+  eras (`app/tests/sql/`).
+- **Takeaway:** a local stand-in gives fast feedback, not evidence about the
+  engine that runs in production.
+
+### A post-deploy job checks regressions, not a watermark
+- A matching `SUCCESS` watermark and ETag mean the source bytes are unchanged,
+  not that the new read path works. `verify:dev` forces a build for one quarter
+  of each source era after `apply:dev` and gates `apply:test`.
+- **Takeaway:** verify behavior with a forced run, never with the state left by
+  an earlier run.
+
+### Guard against operator error with a wrapper plus policy
+- The cross-environment incident was a human mistake on a local path. The
+  wrapper `scripts/tf.ps1` fixes backend and data directory per environment;
+  policy rules P12 (resource project must match the environment) and P13
+  (protection must not be relaxed without an allow entry) check the plan itself.
+- **Takeaway:** a wrapper prevents the usual mistake, the policy catches the
+  plan if the wrapper is bypassed. Neither alone is enough.
+
+### A test that pins a silent skip is worse than no test
+- A test asserting that resources without a `project` are ignored locked in a
+  blind spot and gave false confidence; it was removed and replaced by explicit
+  derivation, naming-convention or exemption handling, with a visible FAIL for
+  unknown types. Likewise `test:sql` fails when tests are skipped.
+- **Takeaway:** an unknown case must fail or be reported, never pass quietly.
+
 ## Plan policy in CI
 
 ### The policy check caught perpetual drift that looked like a normal plan

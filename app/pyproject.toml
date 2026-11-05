@@ -27,8 +27,12 @@ where = ["src"]
 ingest = ["sql/*.sql"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests/unit"]
-markers = ["integration: DEV-only tests requiring cloud access"]
+# tests/sql is collected too; its tests skip unless SQL_TEST_DATASET is set.
+testpaths = ["tests"]
+markers = [
+  "integration: DEV-only tests requiring cloud access",
+  "sql: DEV-only BigQuery SQL tests; skipped unless SQL_TEST_DATASET is set",
+]
 
 [tool.ruff]
 target-version = "py312"

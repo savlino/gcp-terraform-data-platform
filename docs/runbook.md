@@ -306,6 +306,9 @@ Each environment is `infra/env/<env>.tfvars` plus `<env>.gcs.tfbackend` (state
 prefix `infra/<env>`); the Terraform code is identical. On the protected `main`
 branch every pipeline runs `plan:<env>` and `policy:<env>` for all three
 environments, and exposes manual `apply:dev` -> `apply:test` -> `apply:prod`.
+After `apply:dev`, the automatic `verify:dev` job (stage `verify`) must pass
+before `apply:test` can start; `apply:test` and `apply:prod` are in stage
+`promote`. See [post-apply verification](#post-apply-verification-verifydev).
 Each apply needs the previous apply, uses the plan file of the same pipeline,
 runs as `ci-apply-<env>`, and shares a `resource_group` with its plan job.
 Before applying, the job fails if the plan file or its commit marker is
@@ -332,6 +335,37 @@ in all three projects (outputs differ only by project/CIDR names). Negative:
 start `apply:prod` before `apply:test` succeeded (it stays blocked), or delete
 `infra/prod.plan.sha` from a copied artifact and see the guard fail. Neither
 has been run live.
+
+### Post-apply verification (`verify:dev`)
+
+`verify:dev` runs automatically on `main` after a successful `apply:dev`, as
+`ci-apply-dev` (protected refs only), in `resource_group: dev`. It is not
+interruptible. For `VERIFY_QUARTER_INT32` (2025-Q4) and
+`VERIFY_QUARTER_DOUBLE` (2026-Q2), one quarter per source latency type, it runs
+(**bash**, CI):
+
+```bash
+gcloud run jobs execute dev-ingest --project=dep-2610-dev --region=europe-southwest1 \
+  "--args=build,--type,mobile,--quarter,2025-Q4,--force" --wait
+```
+
+It then runs one `bq query` with `--maximum_bytes_billed=104857600`. The job
+fails unless `network_perf.load_log` has a mobile `SUCCESS` row for that
+`quarter_start` with `loaded_at` in the last 30 minutes, and
+`network_perf.ookla_tiles` has mobile rows for it.
+
+Prerequisites: the `dev-ingest` job exists (`enable_ingest_job = true`), and the
+raw mobile files for both quarters are in `dep-2610-dev-raw`. `build` does not
+sync; if they are missing, run the scoped `sync` first (see the Cloud Run
+section). Side effects: each run overwrites the curated DEV mobile partition of
+both quarters from the same raw files, rebuilds the mart, and sends a build
+alert.
+
+Change the quarters through the top-level variables in `.gitlab-ci.yml`, or for
+one run as pipeline variables; the job rejects values that are not `YYYY-QN`.
+On failure: read the Cloud Run execution logs (the job name and execution ID
+are printed), fix the cause, and retry `verify:dev`. Do not skip it to unblock
+`apply:test`. Not yet run in a pipeline.
 
 ## Per-file schema migration
 

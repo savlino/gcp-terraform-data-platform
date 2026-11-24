@@ -220,6 +220,20 @@ data provider's documentation and shaped the design.
 - **Takeaway:** a local stand-in gives fast feedback, not evidence about the
   engine that runs in production.
 
+### An image reference that only apply could reject
+- **What happened:** an MR changed the application; the tfvars got tag
+  `986c22e` and a digest that existed in neither git history nor Artifact
+  Registry (the commit had been rewritten after a local build, and the image was
+  never pushed). Lint, tests, plan and policy were green; `apply:dev` failed
+  with Cloud Run "Image ... not found" (code 5, NOT_FOUND).
+- **Fix:** image built and pushed for the actual last commit of the image
+  inputs (`bda7f24`), digest taken from the registry, three tfvars updated.
+  Two guards added: `check:image-tag` (lint) and `image:check:<env>` (before
+  apply). See the [release flow](runbook.md#release-flow-for-a-new-image).
+- **Takeaway:** Image tag in tfvars equals the last commit that changed the
+  image inputs, and the image is pushed before the tag is committed. The tag is
+  checked against git in lint (MR) and against the registry before apply.
+
 ### A post-deploy job checks regressions, not a watermark
 - A matching `SUCCESS` watermark and ETag mean the source bytes are unchanged,
   not that the new read path works. `verify:dev` forces a build for one quarter

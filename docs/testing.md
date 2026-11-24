@@ -8,6 +8,8 @@ works.
 | --- | --- | --- | --- | --- | --- |
 | Syntax and style | `terraform fmt`, `terraform validate`, `tflint`, Ruff | Terraform formatting/configuration and Python lint/style | CI: `lint` | No | Configured |
 | Terraform modules | `terraform test` with mocked providers | Module wiring, resource properties and variable validation | CI: `test` | No | Configured; mocks do not call GCP |
+| Image reference (git) | `scripts/check_image_tag.py` and its tests | `image_tag`/`image_digest` identical in the three tfvars; `image_tag` is the last commit that changed `app`, `schemas`, `.dockerignore` (full-SHA comparison, shallow clones rejected) | CI: `check:image-tag` in `lint` (MR and `main`) | No | Configured; first pipeline run pending |
+| Image reference (registry) | `image:check:<env>` (gcloud) | The tfvars tag exists in the shared repository; a pinned digest is the tag's digest | CI: `apply`, `main` only, as `ci-apply-<env>`; `apply:<env>` needs it | Yes, ops Artifact Registry (read) | Configured; first pipeline run pending |
 | Plan policy | `scripts/check_plan.py` and its synthetic tests | P0-P13 against a whole-environment Terraform plan JSON | CI: `policy`; plan JSON is produced by `plan:<env>` | No for the policy check; the input plan is cloud-refreshed in CI | Configured |
 | Python logic | `pytest app/tests/unit` | Work selection, source footer contract, DQ decisions, alerts and secret-safe error handling | CI: `python:lint-test` in `test` | No | Configured |
 | SQL integration | `pytest -m sql tests/sql` (from `app/`) | Production `stage`, `quality`, `mart` and `publish` SQL on synthetic data in BigQuery | Locally against DEV; CI: `test:sql` in `test` (MR and `main`) as `ci-sqltest-dev` | Yes, DEV (`sql_tests` dataset) | Configured; first CI run and first run against GCP pending. The job fails if any SQL test is skipped |
@@ -154,6 +156,7 @@ substitute for BigQuery syntax or behavior.
 | Syntax and style | `terraform fmt -check -recursive infra`, `terraform -chdir=infra validate`, `.\app\.venv\Scripts\python.exe -m ruff check --config app/pyproject.toml scripts` |
 | Terraform modules | `terraform -chdir=infra test`, `terraform -chdir=bootstrap test` |
 | Plan policy | `.\app\.venv\Scripts\python.exe -m pytest scripts\tests` (synthetic plans); a real plan goes through `.\scripts\tf.ps1 -Env <env> -Action plan`, which runs `check_plan.py` |
+| Image reference (git) | `.\app\.venv\Scripts\python.exe scripts\check_image_tag.py` |
 | Python logic | `Set-Location app; .\.venv\Scripts\python.exe -m pytest tests\unit` |
 | SQL integration | see [BigQuery SQL tests](#bigquery-sql-tests-apptestssql) (needs DEV and impersonation) |
 | Read-path regression | CI only (`verify:dev`); the manual equivalent is the [forced rebuild](runbook.md#per-file-schema-migration) |

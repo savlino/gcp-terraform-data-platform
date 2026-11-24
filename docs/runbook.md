@@ -313,7 +313,9 @@ Each apply needs the previous apply, uses the plan file of the same pipeline,
 runs as `ci-apply-<env>`, and shares a `resource_group` with its plan job.
 Before applying, the job fails if the plan file or its commit marker is
 missing, or if the marker differs from `CI_COMMIT_SHA`; Terraform also rejects
-a saved plan when the state changed after planning.
+a saved plan when the state changed after planning. Each apply also needs
+`image:check:<env>`, which confirms that the tfvars image exists in the shared
+registry (see [release flow](#release-flow-for-a-new-image)).
 
 Prerequisites (not done by this repository change):
 
@@ -1023,6 +1025,47 @@ The app has bounded transfer
 retries. No measured source-file size is recorded, so these are streaming-based
 estimates, not a guaranteed backfill capacity. Record DEV peak memory and
 duration before increasing limits.
+
+### Release flow for a new image
+
+The image tag is the short SHA of the last commit that changed the image inputs
+(`app/`, `schemas/`, `.dockerignore`). The order matters: the image is built from
+that commit and pushed **before** its tag is committed to tfvars.
+
+1. **Commit the image inputs** on a feature branch. Do not amend, rebase or
+   squash this commit afterwards: a new SHA invalidates the tag.
+2. **Build and push the image (docker push, not git push)** from a clean working
+   copy of the image inputs, following
+   [Build and push the tfvars-selected tag](#2-build-and-push-the-tfvars-selected-tag):
+   ```powershell
+   git status --porcelain -- app schemas .dockerignore   # must be empty
+   $tag = git log -1 --format=%h -- app schemas .dockerignore
+   ```
+   Take the digest only from the registry after the push, never from
+   `docker inspect` (that returns the local config ID):
+   ```powershell
+   gcloud artifacts docker images describe "${repository}:$tag" --project dep-2610-ops "--format=value(image_summary.digest)"
+   ```
+3. **Commit `image_tag` (and `image_digest`, if used)** in all three
+   `infra/env/*.tfvars` in a separate commit that does not touch the image
+   inputs, so the expected tag does not move.
+4. **MR without squash.** The project must use merge commits; squash, rebase
+   or fast-forward merges rewrite the tag commit.
+
+Guards in CI:
+
+- `check:image-tag` (stage `lint`, MR and `main`, no GCP) runs
+  `scripts/check_image_tag.py`: the three tfvars agree on `image_tag` and
+  `image_digest`, and `image_tag` resolves to the same commit as
+  `git log -1 -- app schemas .dockerignore`. Between steps 1 and 3 an MR
+  pipeline fails this job; that is expected until the tag commit is pushed.
+- `image:check:<env>` (stage `apply`, `main` only, as `ci-apply-<env>`) checks
+  that `<image_repository>:<image_tag>` exists in Artifact Registry and, if
+  `image_digest` is set, that it is the digest of that tag. `apply:<env>` needs
+  it. Failure message: "image not found; build and push it first".
+
+Local equivalent of the lint guard (no GCP):
+`.\app\.venv\Scripts\python.exe scripts\check_image_tag.py`.
 
 ### Updating or stopping
 

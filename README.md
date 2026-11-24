@@ -48,8 +48,10 @@ for DEV/TEST/PROD on MR and `main`, and manual apply promotion on `main` only
 (`apply:dev`, then `apply:test`, then `apply:prod`). After `apply:dev`, an automatic
 `verify:dev` job forces a mobile build of one INT32-era and one DOUBLE-era quarter on
 DEV and must pass before `apply:test` (stage `promote`). `test:sql` runs the BigQuery
-SQL tests against DEV `sql_tests` on MRs and `main`. Both are configured; first
-pipeline run pending. An optional unprotected-ref
+SQL tests against DEV `sql_tests` on MRs and `main`. `check:image-tag` (lint) checks
+that the tfvars image tag is the last commit that changed the image inputs, and
+`image:check:<env>` checks that the image exists in the registry before each apply.
+All four are configured; first pipeline run pending. An optional unprotected-ref
 denial check remains available. On GitLab Free there are no protected environments
 or deployment approvals; this repository uses protected `main`, manual jobs and
 `needs` ordering as the gate. Configure the non-secret ops project number, protected
@@ -66,6 +68,8 @@ TODO: Document the implemented identity, access, and secret-handling controls.
 | --- | --- | --- |
 | Terraform fmt/validate/tflint, mocked `terraform test` | CI | Configured |
 | Plan policy P0-P13 (`check_plan.py`) | CI and `scripts/tf.ps1` | Configured |
+| Image tag vs git (`check_image_tag.py`) | CI `check:image-tag` | Configured; first run pending |
+| Image exists in registry before apply | CI `image:check:<env>` | Configured; first run pending |
 | Python unit tests | CI | Configured |
 | BigQuery SQL tests | CI `test:sql`, DEV | Configured; first run pending |
 | Post-deploy regression | CI `verify:dev`, DEV | Configured; first run pending |

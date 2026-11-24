@@ -58,6 +58,17 @@ tflint:
   script:
     - tflint --recursive --config="$CI_PROJECT_DIR/.tflint.hcl" --format=compact
 
+# image_tag in all tfvars must be the last commit that changed the image inputs.
+# Full history: a shallow clone cannot answer "last commit that changed app/".
+check:image-tag:
+  stage: lint
+  image: python:3.12-bookworm    # full image: includes git
+  variables:
+    GIT_DEPTH: "0"
+  script:
+    - git config --global --add safe.directory "$CI_PROJECT_DIR"
+    - python scripts/check_image_tag.py git
+
 terraform-test:
   extends: .terraform
   stage: test
@@ -234,6 +245,65 @@ test:sql:
     # Terraform itself rejects a saved plan when the state changed after planning.
     - terraform -chdir=infra apply -lock-timeout=120s ${CI_ENV}.tfplan
 
+# Pre-apply registry check: the tfvars image (tag, and pinned digest if set) must exist
+# in the shared ops repository. ci-apply-<env> already has artifactregistry.reader there
+# (bootstrap/registry.tf, ci_apply_reader). Runs automatically, so the manual apply
+# button is blocked before anyone presses it.
+.image_check:
+  extends: .gcp_auth
+  stage: apply
+  image: *gcloud_image
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+  needs: []
+  script:
+    - gcloud auth login --cred-file="$GOOGLE_APPLICATION_CREDENTIALS" --quiet
+    - |
+      set -eu
+      py=$(command -v python3 || true)
+      [ -n "$py" ] || py=/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3
+      ref=$("$py" scripts/check_image_tag.py ref "$CI_ENV")
+      set -- $ref
+      [ "$#" -eq 3 ] || { echo "FAIL: unexpected image reference: $ref"; exit 1; }
+      repository=$1; tag=$2; digest=$3
+      log="$CI_PROJECT_DIR/.ci-auth/auth.log"
+      echo "== ${CI_ENV}: ${repository}:${tag} (digest: ${digest})"
+      if ! tag_digest=$(gcloud artifacts docker images describe "${repository}:${tag}" \
+          --project="$GCP_OPS_PROJECT_ID" --format='value(image_summary.digest)' 2>"$log"); then
+        cat "$log"
+        if grep -qi 'not found' "$log"; then
+          echo "FAIL: image not found; build and push it first: ${repository}:${tag}"
+        else
+          echo "FAIL: could not read ${repository}:${tag}; see the error above"
+        fi
+        exit 1
+      fi
+      [ -n "$tag_digest" ] || { echo "FAIL: registry returned no digest for ${repository}:${tag}"; exit 1; }
+      echo "registry: ${tag} -> ${tag_digest}"
+      if [ "$digest" != "-" ] && [ "$digest" != "$tag_digest" ]; then
+        if gcloud artifacts docker images describe "${repository}@${digest}" \
+            --project="$GCP_OPS_PROJECT_ID" > /dev/null 2>"$log"; then
+          echo "FAIL: tfvars image_digest ${digest} is not the digest of tag ${tag} (${tag_digest}); take the digest from the registry"
+        else
+          cat "$log"
+          echo "FAIL: image not found; build and push it first: ${repository}@${digest}"
+        fi
+        exit 1
+      fi
+      echo "PASS: ${CI_ENV} image exists in the registry"
+
+image:check:dev:
+  extends: .image_check
+  variables: {CI_ENV: "dev", CI_SA_KIND: "apply"}
+
+image:check:test:
+  extends: .image_check
+  variables: {CI_ENV: "test", CI_SA_KIND: "apply"}
+
+image:check:prod:
+  extends: .image_check
+  variables: {CI_ENV: "prod", CI_SA_KIND: "apply"}
+
 plan:dev:
   extends: .plan
   resource_group: terraform-dev
@@ -280,6 +350,8 @@ apply:dev:
     - job: plan:dev
       artifacts: true
     - job: policy:dev
+      artifacts: false
+    - job: image:check:dev
       artifacts: false
 
 # Post-apply regression: forced mobile rebuild for one quarter per source schema era.
@@ -351,6 +423,8 @@ apply:test:
       artifacts: true
     - job: policy:test
       artifacts: false
+    - job: image:check:test
+      artifacts: false
 
 apply:prod:
   extends: .apply
@@ -365,6 +439,8 @@ apply:prod:
     - job: plan:prod
       artifacts: true
     - job: policy:prod
+      artifacts: false
+    - job: image:check:prod
       artifacts: false
 
 verify:unprotected-apply-denied:

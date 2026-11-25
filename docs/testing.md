@@ -1,113 +1,119 @@
-# Testing strategy
+# Testing
 
-This matrix distinguishes checks configured today from proposed DEV-backed
-checks. A green local or mocked test does not establish that a live GCP service
-works.
+What each test level proves, where it runs, how to run it locally, which
+mutations have shown that a test can fail, and where coverage stops. A green
+mocked or local test does not show that a live GCP service works; only the
+DEV-backed levels touch GCP.
 
-| Level | Tool | What it checks | Where it runs | GCP required | Status |
-| --- | --- | --- | --- | --- | --- |
-| Syntax and style | `terraform fmt`, `terraform validate`, `tflint`, Ruff | Terraform formatting/configuration and Python lint/style | CI: `lint` | No | Configured |
-| Terraform modules | `terraform test` with mocked providers | Module wiring, resource properties and variable validation | CI: `test` | No | Configured; mocks do not call GCP |
-| Image reference (git) | `scripts/check_image_tag.py` and its tests | `image_tag`/`image_digest` identical in the three tfvars; `image_tag` is the last commit that changed `app`, `schemas`, `.dockerignore` (full-SHA comparison, shallow clones rejected) | CI: `check:image-tag` in `lint` (MR and `main`) | No | Configured; first pipeline run pending |
-| Image reference (registry) | `image:check:<env>` (gcloud) | The tfvars tag exists in the shared repository; a pinned digest is the tag's digest | CI: `apply`, `main` only, as `ci-apply-<env>`; `apply:<env>` needs it | Yes, ops Artifact Registry (read) | Configured; first pipeline run pending |
-| Plan policy | `scripts/check_plan.py` and its synthetic tests | P0-P13 against a whole-environment Terraform plan JSON | CI: `policy`; plan JSON is produced by `plan:<env>` | No for the policy check; the input plan is cloud-refreshed in CI | Configured |
-| Python logic | `pytest app/tests/unit` | Work selection, source footer contract, DQ decisions, alerts and secret-safe error handling | CI: `python:lint-test` in `test` | No | Configured |
-| SQL integration | `pytest -m sql tests/sql` (from `app/`) | Production `stage`, `quality`, `mart` and `publish` SQL on synthetic data in BigQuery | Locally against DEV; CI: `test:sql` in `test` (MR and `main`) as `ci-sqltest-dev` | Yes, DEV (`sql_tests` dataset) | Configured; first CI run and first run against GCP pending. The job fails if any SQL test is skipped |
-| Read-path regression | `verify:dev`: forced `build --type mobile --force` on the DEV Cloud Run job for `VERIFY_QUARTER_INT32` (2025-Q4) and `VERIFY_QUARTER_DOUBLE` (2026-Q2) | Each execution succeeds, `load_log` has a `SUCCESS` row for mobile and that quarter from the last 30 minutes, and `ookla_tiles` has mobile rows for it | CI: `verify`, `main` only, after `apply:dev`; `apply:test` needs it | Yes, DEV | Configured; first pipeline run pending. Does not check column types or DQ details; see the [runbook](runbook.md#post-apply-verification-verifydev) |
+CI stages: `lint`, `test`, `plan`, `policy`, `apply`, `verify`, `promote`
+([.gitlab-ci.yml](../.gitlab-ci.yml)). `apply:dev` runs in `apply`;
+`apply:test` and `apply:prod` run in `promote` because `apply:test` needs
+`verify:dev`, and GitLab `needs` may only point to the same or an earlier stage.
 
-## Current CI and local commands
+## 1. Test matrix
 
-The GitLab stages are `lint`, `test`, `plan`, `policy`, `apply`, `verify` and
-`promote`. `apply:dev` runs in `apply`; `apply:test` and `apply:prod` run in
-`promote` because `apply:test` needs `verify:dev`, and GitLab `needs` may only
-point to jobs in the same or an earlier stage.
+| Level | Tool | What it proves | Where it runs (job, stage) | Needs GCP |
+| --- | --- | --- | --- | --- |
+| Formatting and lint | `terraform fmt -check`, `terraform validate` (`bootstrap`, `infra`), `tflint`, Ruff (`app/src`, `app/tests`, `scripts`) | Terraform is formatted and valid without a backend; TFLint rules from `.tflint.hcl`; Python lint | `fmt`, `validate`, `tflint` (`lint`); Ruff in `python:lint-test` (`test`); MR and `main` | No |
+| Terraform module tests | `terraform test`, `command = plan`, mocked `google`/`google-beta` providers: `bootstrap/tests/{registry,wif}.tftest.hcl`, `infra/tests/{bigquery,dev,iam,ingest_job,ingest_root,network,secrets,storage}.tftest.hcl` | Resource wiring, IAM roles and members of named resources, protection flags, variable validation (`expect_failures`): CI identities for exactly `dev`/`test`/`prod`, `ci-sqltest-dev` with only `bigquery.jobUser` on DEV and no registry access, no human access to PROD, `sql_tests` only in DEV, digest pinning overrides the tag | `terraform-test` (`test`), MR and `main` | No |
+| Terraform plan guards (local) | `infra/tests/check-secret-plan.ps1`, `infra/tests/check-ingest-plan.ps1` | Parse the JSON events of the mocked secrets and ingest tests: a secret container but no secret version; one job and one schedule, pause defaults per environment, region independence, no VPC attachment or secret injection, application settings, scoped IAM only | Local only | No |
+| Plan policy | `scripts/check_plan.py` on the plan JSON of `plan:<env>` | Rules P0-P13 on the whole environment plan (no secret versions or SA keys, no authoritative IAM or basic roles, no public principals, bucket, firewall and VM rules, labels, no data-resource deletes without an allow entry, PROD rules, project of every change equals the environment, no protection relaxed without an allow entry); stale or duplicate allow-destroy entries fail | `policy:<env>` (`policy`), needs `plan:<env>`; MR and `main`. Locally inside `scripts/tf.ps1 -Env <env> -Action plan` | No for the check; the plan itself is refreshed against GCP |
+| Plan policy unit tests | `pytest scripts/tests/test_check_plan.py` | Each rule passes and fails on synthetic plans, including stale entries and P12 derivation, convention and exemption paths | `python:lint-test` (`test`) | No |
+| Bootstrap destroy guard | `scripts/check_bootstrap_plan.py`, run by `scripts/tf.ps1 -Root bootstrap -Action plan`; tests in `scripts/tests/test_check_bootstrap_plan.py` | Any delete or replacement in the bootstrap plan fails unless listed in `bootstrap/allow-destroy`; stale entries fail. Destroy-only: no other bootstrap rule | Guard: local only (bootstrap is never applied from CI). Unit tests: `python:lint-test` (`test`) | Guard: yes (local plan); unit tests: no |
+| Image tag check | `scripts/check_image_tag.py git`; tests in `scripts/tests/test_check_image_tag.py` | `image_tag` and `image_digest` are identical in the three tfvars; `image_tag` resolves to the last commit that changed `IMAGE_INPUTS` (full-SHA comparison); shallow clones and unknown tags fail; `IMAGE_INPUTS` covers every `COPY` source of `app/Dockerfile` | `check:image-tag` (`lint`, `GIT_DEPTH: "0"`); unit tests in `python:lint-test`; MR and `main` | No |
+| Pre-apply image check | `image:check:<env>`: `gcloud artifacts docker images describe` as `ci-apply-<env>` | `<image_repository>:<image_tag>` exists in the shared ops repository; a pinned `image_digest` is that tag's digest. `apply:<env>` needs it | `image:check:dev`, `:test`, `:prod` (`apply`), `main` only | Yes, ops Artifact Registry (read) |
+| Python unit tests | `pytest app/tests/unit` | Work selection, layout, source footer contract, schema checks, DQ decisions, build orchestration, alerts and secret-safe errors; SQL rendering and mart logic on SQLite | `python:lint-test` (`test`), MR and `main` | No |
+| SQL tests on synthetic data | `pytest -m sql app/tests/sql` | Production `stage`, `quality`, `mart` and `publish` SQL in BigQuery on synthetic Parquet of both source eras (latency INT32 and DOUBLE) with NULL latency inputs; expected values computed by hand. Details below | `test:sql` (`test`) as `ci-sqltest-dev`, MR and `main`; the job fails if any test is skipped | Yes, DEV dataset `sql_tests` |
+| Post-deploy regression | `verify:dev`: forced `build --type mobile --force` on `dev-ingest` for `VERIFY_QUARTER_INT32` (2025-Q4) and `VERIFY_QUARTER_DOUBLE` (2026-Q2) | The deployed image reads both source eras: each execution succeeds, `load_log` has a mobile `SUCCESS` row for the quarter from the last 30 minutes, `ookla_tiles` has mobile rows for it | `verify:dev` (`verify`), `main` only, after `apply:dev`; `apply:test` needs it | Yes, DEV |
 
-Commands below are **PowerShell 7 on Windows**, from the repository root.
-Terraform tests use mocked providers and require initialization without a
-remote backend:
+### SQL tests (`app/tests/sql/`)
+
+- Selected by the `sql` marker and skipped unless `SQL_TEST_DATASET` is set to
+  `<project_id>.<dataset_id>` (DEV: `dep-2610-dev.sql_tests`). GCP clients are
+  created only in the session fixture, so collection needs no credentials.
+  Module names are `test_bq_*.py`; `tests/unit/test_layout.py` fails if two
+  test modules share a basename.
+- Each test creates its own copies of `ookla_tiles`, `load_log` and
+  `mart_quarterly_performance` from `schemas/*.json` with the Terraform
+  partitioning, clustering and `require_partition_filter`. Table names carry a
+  per-run prefix; the session fixture deletes them in teardown, also after
+  failures. The dataset's one-hour table expiration is a safety net for
+  cancelled runs. `network_perf` and buckets are never touched.
+- Inputs are loaded from memory (`load_table_from_json`, `load_table_from_file`
+  with pyarrow Parquet). SQL is the production `app/src/ingest/sql/*.sql`,
+  rendered by `ingest.build.sql(..., tables=...)` and run through production
+  `query()` with `maximum_bytes_billed` (100 MiB).
+- Cases:
+  - `stage`: bbox filter, kbps to Mbps, identical target types for both eras,
+    NULL latency stays NULL in both eras;
+  - `quality`: exact planted ERROR counts, empty region, latency sentinel as
+    WARN, `null_down_rows` WARN equal to the real NULL count with no ERROR;
+  - `mart`: tests-weighted averages, outlier affects only its own latency
+    average, quarter-over-quarter only for the adjacent quarter, NULL latency
+    excluded from latency averages but included in speeds, tiles and tests;
+  - `publish`: replacing one network type and quarter leaves the other type
+    and quarters unchanged.
+
+## 2. Running each level locally
+
+**PowerShell** on Windows, from the repository root, with the app virtual
+environment in `app\.venv`. Terraform tests need no credentials (mocked
+providers, `init -backend=false`).
 
 ```powershell
+$python = '.\app\.venv\Scripts\python.exe'
+
+# Formatting and lint
 terraform fmt -check -recursive bootstrap
 terraform fmt -check -recursive infra
 terraform fmt -check -recursive modules
-
 terraform -chdir=bootstrap init -backend=false -lockfile=readonly
 terraform -chdir=bootstrap validate
 terraform -chdir=infra init -backend=false -lockfile=readonly
 terraform -chdir=infra validate
+tflint --recursive --config="$PWD\.tflint.hcl"
+Push-Location app; & .\.venv\Scripts\python.exe -m ruff check src tests; Pop-Location
+& $python -m ruff check --config app/pyproject.toml scripts
+
+# Terraform module tests and local plan guards
 terraform -chdir=bootstrap test
 terraform -chdir=infra test
+& .\infra\tests\check-secret-plan.ps1
+& .\infra\tests\check-ingest-plan.ps1
 
-Set-Location app
-.\.venv\Scripts\python.exe -m ruff check src tests
-.\.venv\Scripts\python.exe -m pytest tests\unit
-Set-Location ..
-.\app\.venv\Scripts\python.exe -m ruff check --config app/pyproject.toml scripts
-.\app\.venv\Scripts\python.exe -m pytest scripts\tests
+# Plan policy, bootstrap guard and image tag unit tests (synthetic input)
+& $python -m pytest scripts\tests
+
+# Plan policy / bootstrap destroy guard on a real plan (needs ADC)
+.\scripts\tf.ps1 -Env dev -Action plan
+.\scripts\tf.ps1 -Root bootstrap -Action plan   # requires $env:TF_VAR_developer_principal
+
+# Image tag check (no GCP; needs full git history)
+& $python scripts\check_image_tag.py
+
+# Python unit tests
+Push-Location app; & .\.venv\Scripts\python.exe -m pytest tests\unit; Pop-Location
 ```
 
-Mock providers replace cloud calls, not root input variables. The bootstrap
-test files explicitly set `developer_principal`,
-`human_access_environments` and `enable_sql_test_access` in their file-level
-`variables` blocks, so deployment `TF_VAR_*` values for these inputs cannot
-change the test scenarios. Individual runs override these fixtures to test
-enabled access and invalid inputs. Keep deployment variables intact when
-running tests; clearing them can change the next real plan.
-CI environments are derived from the project map, with literal assertions for
-`dev`, `test`, `prod` and exclusion of `ops`. The explicit-null fixture checks
-that no human bindings are created; negative runs reject groups, bare emails,
-workload identities and PROD human access. Missing required input is checked
-with the noninteractive wrapper procedure in the
+Mock providers replace cloud calls, not root input variables: the bootstrap
+test files set `developer_principal`, `human_access_environments` and
+`enable_sql_test_access` in their `variables` blocks, so deployment `TF_VAR_*`
+values cannot change the scenarios. A missing required bootstrap input is
+checked with the noninteractive wrapper procedure in the
 [bootstrap runbook](runbook.md#bootstrap-only-through-scriptstfps1--root-bootstrap),
-not with `expect_failures`, which handles validation rather than missing inputs.
+not with `expect_failures`.
 
-In CI, Ruff and Python tests run with Python 3.12. Terraform formatting,
-validation and mocked tests use the pinned Terraform image; TFLint uses its
-pinned image. The Terraform JSON policy checker consumes plans from the
-environment plan jobs, so its decision is only as current as the backend and
-saved plan it receives. See [CI configuration](../.gitlab-ci.yml).
+**Pre-apply image check** (manual equivalent of `image:check:<env>`):
 
-## DEV-backed checks
+```powershell
+$ref = (& $python scripts\check_image_tag.py ref dev) -split ' '
+gcloud artifacts docker images describe "$($ref[0]):$($ref[1])" --project dep-2610-ops "--format=value(image_summary.digest)"
+# Must print a digest; if tfvars pins one ($ref[2] is not '-'), it must equal $ref[2].
+```
 
-### BigQuery SQL tests (`app/tests/sql/`)
-
-- Selected by the `sql` marker and skipped unless `SQL_TEST_DATASET` is set to
-  `<project_id>.<dataset_id>` (DEV: `dep-2610-dev.sql_tests`). `testpaths` is
-  `tests`, so `pytest`, `pytest tests` and `pytest -m sql` collect them and
-  report them as skipped. GCP clients and `SQL_TEST_DATASET` are touched only
-  inside the session fixture, never at import, so collection needs no
-  credentials. Modules are named `test_bq_*.py`; a unit test
-  (`tests/unit/test_layout.py`) fails if two test modules share a basename.
-- They never touch `network_perf` or buckets. Each test creates its own copies
-  of `ookla_tiles`, `load_log` and `mart_quarterly_performance` from
-  `schemas/*.json`, with the Terraform partitioning, clustering and
-  `require_partition_filter`.
-- Every table name starts with a per-run prefix (`t<UTC timestamp>_<random>_`).
-  The session fixture deletes all tables with that prefix in teardown, also
-  after failures, and fails if a deletion fails. The dataset's one-hour table
-  expiration is only a safety net.
-- Inputs are loaded from memory (`load_table_from_json`, and
-  `load_table_from_file` for synthetic Parquet built with pyarrow); no GCS.
-  Both source eras are covered: latency down/up as INT32 and as DOUBLE. Each
-  synthetic source file has two in-region tiles with NULL `avg_lat_down_ms`
-  (one also NULL `avg_lat_up_ms`).
-- SQL is the production `app/src/ingest/sql/*.sql`, rendered by
-  `ingest.build.sql(..., tables=...)` and run through production `query()`, so
-  every query job has `maximum_bytes_billed` (100 MiB in the tests; DML
-  bills at least 10 MB per referenced table). Load jobs
-  are not billed per byte and have no such setting.
-- Cases: bbox filter, kbps to Mbps and target types for both eras (`stage`);
-  NULL latency stays NULL in both eras (`stage`); exact ERROR counts, empty
-  region, latency-sentinel WARN and `null_down_rows` WARN equal to the real
-  NULL count with no ERROR (`quality`); tests-weighted averages, outlier
-  isolation, NULL latencies excluded from latency numerator and denominator
-  but included in speeds, tiles and tests, and quarter-over-quarter (`mart`); replacing one network type leaves the other unchanged (`publish`).
-  Expected values are computed by hand in comments.
-
-Run (**PowerShell 7 on Windows**, ADC impersonating `ci-sqltest-dev`). Impersonation
-needs `roles/iam.serviceAccountTokenCreator` on that account in `dep-2610-ops`;
-bootstrap does not grant it to humans (its human Token Creator grant is on the
-environment projects only), so that permission is a manual, temporary step:
+**SQL tests** against DEV. ADC impersonates `ci-sqltest-dev`; this needs
+`roles/iam.serviceAccountTokenCreator` on that account in `dep-2610-ops`,
+which bootstrap does not grant to humans, so it is a manual, temporary step:
 
 ```powershell
 gcloud auth application-default login --impersonate-service-account=ci-sqltest-dev@dep-2610-ops.iam.gserviceaccount.com
@@ -118,82 +124,89 @@ Remove-Item Env:SQL_TEST_DATASET
 Set-Location ..
 ```
 
-CI-equivalent collection check without GCP (**bash**, Linux, from the
-repository root, as in `python:lint-test`). Credentials point to a missing
-file, so any credential lookup during collection would fail:
+Without `SQL_TEST_DATASET`, `pytest tests` from `app` runs the unit tests and
+reports the SQL tests as skipped; no credentials are needed for collection.
 
-```bash
-python -m pip install --no-cache-dir -e "./app[dev]"
-unset SQL_TEST_DATASET
-export GOOGLE_APPLICATION_CREDENTIALS=/nonexistent/credentials.json
-pytest -rs app/tests                 # unit tests pass, SQL tests skipped
-(cd app && pytest -rs -m sql)        # SQL tests skipped, unit tests deselected
-```
+**Post-deploy regression**: CI only (`verify:dev`). The manual equivalent is
+the forced rebuild in the [runbook](runbook.md#post-apply-verification-verifydev).
 
-The `python:lint-test` job still runs `pytest app/tests/unit` only, so CI does
-not exercise this no-GCP collection path; `test:sql` collects `app/tests/sql`
-with `SQL_TEST_DATASET` set.
+## 3. Mutation checks
 
-`test:sql` (**bash**, `python:3.12-slim`) authenticates through WIF as
-`ci-sqltest-dev` with the `.gcp_auth` template (no gcloud in the image) and runs:
+A test is trusted once a deliberate defect makes it fail. Each mutation is a
+temporary change that must be reverted. Result and date record only runs that
+were actually performed; empty cells mean the check is defined but not
+recorded.
 
-```bash
-python -m pip install --no-cache-dir -e "./app[dev]"
-SQL_TEST_DATASET=dep-2610-dev.sql_tests pytest -m sql app/tests/sql --junitxml=sql-junit.xml
-grep -q 'skipped="0"' sql-junit.xml   # a skipped run fails the job
-```
-
-The JUnit report is uploaded even when tests fail. A cancelled job skips the
-session teardown; the one-hour table expiration in `sql_tests` removes leftovers.
-
-The local SQLite tests in `tests/unit` remain fast feedback but are not a
-substitute for BigQuery syntax or behavior.
-
-## Running each level locally
-
-| Level | Command (**PowerShell 7**, repository root unless noted) |
-| --- | --- |
-| Syntax and style | `terraform fmt -check -recursive infra`, `terraform -chdir=infra validate`, `.\app\.venv\Scripts\python.exe -m ruff check --config app/pyproject.toml scripts` |
-| Terraform modules | `terraform -chdir=infra test`, `terraform -chdir=bootstrap test` |
-| Plan policy | `.\app\.venv\Scripts\python.exe -m pytest scripts\tests` (synthetic plans); a real plan goes through `.\scripts\tf.ps1 -Env <env> -Action plan`, which runs `check_plan.py` |
-| Image reference (git) | `.\app\.venv\Scripts\python.exe scripts\check_image_tag.py` |
-| Python logic | `Set-Location app; .\.venv\Scripts\python.exe -m pytest tests\unit` |
-| SQL integration | see [BigQuery SQL tests](#bigquery-sql-tests-apptestssql) (needs DEV and impersonation) |
-| Read-path regression | CI only (`verify:dev`); the manual equivalent is the [forced rebuild](runbook.md#per-file-schema-migration) |
-
-## Mutation checks
-
-A test is only trusted once a deliberate defect makes it fail. Each check
-below is a temporary change that must be reverted. "Result" records only what
-was actually run; an empty result means the check is defined but not yet
-performed.
-
-| Test | Mutation | Expected failure | Result |
+| Mutation | Expected failing test | Result | Date |
 | --- | --- | --- | --- |
-| Bootstrap IAM test | `objectUser` changed to `objectCreator` | The role assertion fails | Run once; see [lessons learned](lessons-learned.md#testing-terraform) |
-| Bootstrap WIF test (SQL test SA) | (1) pool path built with the project ID, (2) `"test"` added to the SQL test SA map, (3) `ci_apply_reader` granted to the SQL test SA | Assertions 1, 2 and 3 fail respectively | Not recorded |
-| SQL test `stage` (NULL latency) | Wrap the latency column in `COALESCE(x, 0)` in `stage.sql` | NULL-stays-NULL test fails in both eras | Not run against BigQuery |
-| Plan policy P12/P13 and stale entries | Remove the rule or the allow-file entry | The matching test in `scripts/tests` fails | Not recorded |
+| `roles/storage.objectUser` changed to `roles/storage.objectCreator` in a Terraform IAM grant | The `terraform test` assertion on that role (`infra/tests/iam.tftest.hcl` `runtime_scoped_grants` or `bootstrap/tests/wif.tftest.hcl` `all_environment_federation`; [lessons learned](lessons-learned.md#testing-terraform) does not say which) | Failed as expected | |
+| WIF pool path built from the project ID instead of the project number | `bootstrap/tests/wif.tftest.hcl` `dev_sql_test_identity_is_job_user_only` (literal pool path in the federation member) | | |
+| `"test"` added to the `ci-sqltest-dev` map | `bootstrap/tests/wif.tftest.hcl` `dev_sql_test_identity_is_job_user_only` (exactly one SA keyed `dev`) | | |
+| `ci_apply_reader` granted to `ci-sqltest-dev` | `bootstrap/tests/wif.tftest.hcl` `dev_sql_test_identity_is_job_user_only` (no registry grant names the SA) | | |
+| `COALESCE(avg_lat_down_ms, 0)` in `app/src/ingest/sql/stage.sql` | `test_bq_stage.py::test_stage_keeps_null_latency_as_null` (both eras) | | |
+| NULL latency counted as 0 in the latency average of `app/src/ingest/sql/mart.sql` | `test_bq_mart.py::test_null_latency_is_excluded_from_latency_averages_only` | | |
+| Broken production SQL on an MR branch | `test:sql` fails (see [section 4](#4-negative-ci-evidence)) | | |
+| `SQL_TEST_DATASET` unset in `test:sql` | `test:sql` fails on `skipped="0"` instead of passing with skipped tests | | |
+| P12 or P13 removed from `check_plan.py`, or stale-entry detection disabled | The matching tests in `scripts/tests/test_check_plan.py` | | |
+| tfvars `image_tag = "986c22e"` (state of `main` at `381df6d`) | `check:image-tag`: `image_tag 986c22e is not a commit in this repository` | Failed as expected (real pipeline on `ci/image-tag-guards` before it was merged with `main`) | 2026-11-24 |
+| `COPY app/BUILD.md ...` added to `app/Dockerfile` (source outside `IMAGE_INPUTS`) | `test_check_image_tag.py::test_image_inputs_cover_every_dockerfile_copy_source` | Failed as expected (local run) | 2026-11-25 |
 
-The check IDs B8 and D5 do not appear anywhere in this repository; if they
-come from an external checklist, add their results to this table with the
-command used and the date.
+## 4. Negative CI evidence
 
-## Why these tests exist
+`test:sql` was run on an MR branch with deliberately broken production SQL; the
+pipeline failed on `test:sql` and blocked the MR:
 
-The [2026-10-29 incident](incidents/2026-10-29-cross-env-plan.md) (a TEST plan
-applied to DEV state) is the reason for the wrapper `scripts/tf.ps1` and policy
-rules P12 and P13. The 2026-Q2 source type change, hidden by a matching
-watermark, is the reason for `verify:dev`. See
-[lessons learned](lessons-learned.md#testing-lessons).
+- MR view: [docs/screenshots/mr-sql-test-failure.png](screenshots/mr-sql-test-failure.png)
+- Job log: [docs/screenshots/job-test-sql-failure.png](screenshots/job-test-sql-failure.png)
 
-`verify:dev` exercises both physical Parquet eras (INT32 and DOUBLE latency)
-through the deployed Cloud Run job. It uses `--force`, so a matching ETag cannot
-skip the read path, and fails if either quarter fails. A forced build overwrites
-the curated DEV mobile partition for each quarter with the same raw input and
-rebuilds the mart. Raw files for both quarters must already be in the DEV raw
-bucket. The 30-minute freshness window can be satisfied by a manual forced
-build made shortly before the job; the job does not compare `loaded_at` with
-its own start time. It does not assert FLOAT64 latency columns or individual DQ
-rules; the job's own DQ gate must pass for `SUCCESS` to be written. The
-runbook documents manual forced checks and recovery after a table replacement.
+Screenshots must not show personal data (emails, project numbers, tokens).
+
+`check:image-tag` failed on a real pipeline on 2026-11-24 when a branch still
+carried the unpublished tag `986c22e` (see the mutation table above); no
+screenshot is stored.
+
+## 5. Cross-environment data consistency
+
+After all three environments have processed the same quarters, `ookla_tiles`
+row counts per network type and quarter must be identical in DEV, TEST and
+PROD: the code, image and source files are the same. Needs BigQuery read
+access in all three projects (bootstrap grants humans no PROD access). The
+query filters on `quarter_start`, which the table requires.
+
+```powershell
+$counts = @{}
+foreach ($e in 'dev', 'test', 'prod') {
+  $p = "dep-2610-$e"
+  $out = bq --project_id=$p --location=europe-southwest1 query --use_legacy_sql=false --format=csv --maximum_bytes_billed=104857600 "SELECT network_type, quarter_start, COUNT(*) AS tile_rows FROM ``$p.network_perf.ookla_tiles`` WHERE quarter_start >= '2023-07-01' GROUP BY 1, 2 ORDER BY 1, 2"
+  if ($LASTEXITCODE -ne 0) { throw "bq failed for $e" }
+  $counts[$e] = $out -join "`n"
+}
+if ($counts.dev -ne $counts.test -or $counts.dev -ne $counts.prod) {
+  $counts.GetEnumerator() | ForEach-Object { "== $($_.Key)"; $_.Value }
+  throw 'ookla_tiles counts differ between environments'
+}
+'PASS: identical ookla_tiles counts'; $counts.dev
+```
+
+| Date | Quarters compared | Result |
+| --- | --- | --- |
+| YYYY-MM-DD | | |
+
+## 6. Known coverage boundaries
+
+- `terraform test` asserts on named resources only; it cannot enumerate every
+  resource of a type in a plan. The plan-JSON policy in CI covers that gap for
+  environment plans.
+- `check_plan.py` is not applied to bootstrap. The bootstrap guard is
+  destroy-only (`check_bootstrap_plan.py`) and runs locally through
+  `scripts/tf.ps1 -Root bootstrap`; other bootstrap changes rely on review.
+- SQL tests run only in DEV (`sql_tests`); TEST and PROD SQL behavior is
+  inferred from the identical image and SQL files.
+- `verify:dev` checks two quarters of `mobile` only, presence of rows and a
+  fresh `SUCCESS` watermark; not `fixed`, other quarters, column types or
+  individual DQ rules.
+- `image:check:<env>` requires the image in every environment, also where the
+  ingest job is disabled.
+- `python:lint-test` runs `pytest app/tests/unit`, so CI does not exercise SQL
+  test collection without `SQL_TEST_DATASET`.
+- No load or performance tests.

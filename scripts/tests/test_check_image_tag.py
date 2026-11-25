@@ -117,7 +117,7 @@ def test_empty_git_result_fails(tmp_path):
     write_tfvars(tmp_path, same("bda7f24"))
     code, _, err = run(tmp_path, fake_git(last_full=""))
     assert code == 1
-    assert "no commit changed the image inputs (app, schemas, .dockerignore)" in err
+    assert "no commit changed the image inputs (app/Dockerfile, app/pyproject.toml, " in err
     assert "expected tag is empty" in err
 
 
@@ -175,3 +175,40 @@ def test_ref_without_digest_prints_dash_and_tfvars_repository_wins(tmp_path):
     code, out, _ = run(tmp_path, fake_git(), "ref", "prod")
     assert code == 0
     assert out == f"{other} bda7f24 -\n"
+
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def covered(path):
+    """True if a repository path lies inside one of IMAGE_INPUTS."""
+    return any(path == item or path.startswith(item + "/") for item in check_image_tag.IMAGE_INPUTS)
+
+
+def test_print_inputs_lists_one_path_per_line(tmp_path):
+    code, out, err = run(tmp_path, fake_git(), "--print-inputs")
+    assert (code, err) == (0, "")
+    assert out.splitlines() == [
+        "app/Dockerfile",
+        "app/pyproject.toml",
+        "app/src",
+        "schemas",
+        ".dockerignore",
+    ]
+
+
+def test_image_inputs_cover_every_dockerfile_copy_source():
+    sources = []
+    for line in (REPO / "app" / "Dockerfile").read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if parts and parts[0].upper() in ("COPY", "ADD"):
+            assert not any(p.startswith("--from") for p in parts), "multi-stage COPY: update test"
+            sources += [p.rstrip("/") for p in parts[1:-1] if not p.startswith("--")]
+    assert sources, "no COPY in app/Dockerfile"
+    assert [s for s in sources if not covered(s)] == []
+
+
+def test_image_inputs_exclude_tests_and_include_build_definition():
+    assert covered("app/Dockerfile") and covered(".dockerignore")
+    assert not covered("app/tests/sql/test_bq_stage.py")
+    assert not covered("app/README.md")

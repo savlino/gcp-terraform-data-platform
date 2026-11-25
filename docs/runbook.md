@@ -1028,9 +1028,13 @@ duration before increasing limits.
 
 ### Release flow for a new image
 
-The image tag is the short SHA of the last commit that changed the image inputs
-(`app/`, `schemas/`, `.dockerignore`). The order matters: the image is built from
-that commit and pushed **before** its tag is committed to tfvars.
+The image tag is the short SHA of the last commit that changed the image inputs.
+The only list of image inputs is `IMAGE_INPUTS` in `scripts/check_image_tag.py`
+(the Dockerfile, the files it copies and `.dockerignore`; not `app/tests` or
+docs); print it with `scripts/check_image_tag.py --print-inputs`. A unit test
+fails if a Dockerfile `COPY` source is not in the list. The order matters: the
+image is built from that commit and pushed **before** its tag is committed to
+tfvars.
 
 1. **Commit the image inputs** on a feature branch. Do not amend, rebase or
    squash this commit afterwards: a new SHA invalidates the tag.
@@ -1038,8 +1042,11 @@ that commit and pushed **before** its tag is committed to tfvars.
    copy of the image inputs, following
    [Build and push the tfvars-selected tag](#2-build-and-push-the-tfvars-selected-tag):
    ```powershell
-   git status --porcelain -- app schemas .dockerignore   # must be empty
-   $tag = git log -1 --format=%h -- app schemas .dockerignore
+   $python = '.\app\.venv\Scripts\python.exe'
+   $inputs = & $python scripts\check_image_tag.py --print-inputs   # one path per line -> array
+   if ($LASTEXITCODE -ne 0 -or -not $inputs) { throw 'Cannot read image inputs' }
+   if (git status --porcelain -- @inputs) { throw 'Image inputs have uncommitted changes' }
+   $tag = git log -1 --format=%h -- @inputs
    ```
    Take the digest only from the registry after the push, never from
    `docker inspect` (that returns the local config ID):
@@ -1057,7 +1064,8 @@ Guards in CI:
 - `check:image-tag` (stage `lint`, MR and `main`, no GCP) runs
   `scripts/check_image_tag.py`: the three tfvars agree on `image_tag` and
   `image_digest`, and `image_tag` resolves to the same commit as
-  `git log -1 -- app schemas .dockerignore`. Between steps 1 and 3 an MR
+  `git log -1` over the image inputs. Changes outside them (for example
+  `app/tests`, `app/README.md`) need no new image. Between steps 1 and 3 an MR
   pipeline fails this job; that is expected until the tag commit is pushed.
 - `image:check:<env>` (stage `apply`, `main` only, as `ci-apply-<env>`) checks
   that `<image_repository>:<image_tag>` exists in Artifact Registry and, if

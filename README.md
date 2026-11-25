@@ -64,27 +64,13 @@ single member, and plan files can include resource attribute values.
 TODO: Document the implemented identity, access, and secret-handling controls.
 
 ## Testing
-| Level | Where | Status |
-| --- | --- | --- |
-| Terraform fmt/validate/tflint, mocked `terraform test` | CI | Configured |
-| Plan policy P0-P13 (`check_plan.py`) | CI and `scripts/tf.ps1` | Configured |
-| Image tag vs git (`check_image_tag.py`) | CI `check:image-tag` | Configured; first run pending |
-| Image exists in registry before apply | CI `image:check:<env>` | Configured; first run pending |
-| Python unit tests | CI | Configured |
-| BigQuery SQL tests | CI `test:sql`, DEV | Configured; first run pending |
-| Post-deploy regression | CI `verify:dev`, DEV | Configured; first run pending |
-
-How to run each level, mutation checks and their results: [docs/testing.md](docs/testing.md).
-Why the wrapper and policy rules exist: [2026-10-29 incident](docs/incidents/2026-10-29-cross-env-plan.md).
-Lessons: [docs/lessons-learned.md](docs/lessons-learned.md#testing-lessons).
-
-The [testing matrix](docs/testing.md) separates local/mocked CI checks from
-DEV-backed checks. Current CI runs Terraform format/validation,
-TFLint, mocked Terraform tests, Ruff, Python unit tests, plan policy checks,
-and per-environment plans. Configured but not yet run in a pipeline:
-`test:sql` (production SQL on synthetic data in DEV BigQuery) and `verify:dev`
-(post-`apply:dev` forced builds for both source schema eras). Local SQLite SQL
-tests also run in CI. No live GCP test is claimed.
+Every MR and `main` pipeline runs Terraform fmt/validate/TFLint, mocked `terraform test` for
+bootstrap and infra, Ruff, Python unit tests, the image tag check, per-environment plans with
+the P0-P13 plan policy, and BigQuery SQL tests on synthetic data of both source schema eras in
+DEV. On `main`, each apply first checks that the image exists in the registry, and `verify:dev`
+rebuilds one quarter per schema era after `apply:dev`. Matrix, local commands, mutation checks
+and coverage boundaries: [docs/testing.md](docs/testing.md). Why the wrapper and the policy
+rules exist: [docs/incidents/](docs/incidents/).
 
 ## Cost and teardown
 Initial storage estimate for Artifact Registry image retention: [docs/cost.md](docs/cost.md).

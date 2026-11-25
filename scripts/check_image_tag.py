@@ -3,7 +3,7 @@
 Subcommands
   git        (default) Lint check, no cloud access. Fails unless:
              - the clone is not shallow;
-             - some commit changed the image inputs (app, schemas, .dockerignore);
+             - some commit changed the image inputs (IMAGE_INPUTS below);
              - image_tag is set once in each of dev/test/prod tfvars and all three agree;
              - image_digest (optional) is identical in all three, or absent/null in all three;
              - image_tag resolves to a commit in this repository, and that commit is the
@@ -13,6 +13,15 @@ Subcommands
   ref ENV    Print "<image_repository> <image_tag> <image_digest or ->" for one
              environment, for the pre-apply registry check. image_repository comes from
              the tfvars file, otherwise from the default in infra/variables.tf.
+
+  --print-inputs
+             Print IMAGE_INPUTS, one path per line, and exit. This is the only list of
+             image inputs; the runbook computes the release tag from this output.
+
+IMAGE_INPUTS are exactly the paths that reach the image build: the Dockerfile, the
+files it copies (app/pyproject.toml, app/src, schemas) and .dockerignore, which selects
+the build context. app/tests and docs are excluded, so changing them needs no new image.
+scripts/tests/test_check_image_tag.py fails if a Dockerfile COPY source is not covered.
 
 Exit codes: 0 pass, 1 check failed, 2 usage or input error.
 """
@@ -24,7 +33,7 @@ import sys
 from pathlib import Path
 
 ENVS = ("dev", "test", "prod")
-IMAGE_INPUTS = ("app", "schemas", ".dockerignore")
+IMAGE_INPUTS = ("app/Dockerfile", "app/pyproject.toml", "app/src", "schemas", ".dockerignore")
 ROOT = Path(__file__).resolve().parents[1]
 
 _ASSIGN = r'^[ \t]*{name}[ \t]*=[ \t]*(?:"(?P<str>[^"\n]*)"|(?P<null>null))[ \t]*(?:#.*)?$'
@@ -161,12 +170,18 @@ def main(argv=None, root=ROOT, git=run_git, out=sys.stdout, err=sys.stderr):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument(
+        "--print-inputs", action="store_true", help="print the image input paths and exit"
+    )
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("git", help="lint check against git history (default)")
     ref = sub.add_parser("ref", help="print the image reference of one environment")
     ref.add_argument("env", choices=ENVS)
     args = parser.parse_args(argv)
 
+    if args.print_inputs:
+        print("\n".join(IMAGE_INPUTS), file=out)
+        return 0
     try:
         if args.command == "ref":
             repository, tag, digest = image_ref(root, args.env)

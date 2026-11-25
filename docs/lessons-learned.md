@@ -233,6 +233,12 @@ data provider's documentation and shaped the design.
 - **Takeaway:** Image tag in tfvars equals the last commit that changed the
   image inputs, and the image is pushed before the tag is committed. The tag is
   checked against git in lint (MR) and against the registry before apply.
+- **Follow-up:** the first filter was the whole `app/` directory, so a change to
+  `app/tests` (excluded by `.dockerignore`) demanded a new, byte-identical
+  image. The inputs are now exactly what the build reads (`app/Dockerfile`, the
+  files it copies, `.dockerignore`), listed once in `scripts/check_image_tag.py`
+  (`--print-inputs`); a unit test fails if a Dockerfile `COPY` source is not
+  covered. A guard that demands pointless work gets bypassed.
 
 ### A post-deploy job checks regressions, not a watermark
 - A matching `SUCCESS` watermark and ETag mean the source bytes are unchanged,

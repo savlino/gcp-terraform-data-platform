@@ -77,6 +77,7 @@ terraform-test:
     - terraform -chdir=bootstrap test
     - terraform -chdir=infra init -backend=false -lockfile=readonly
     - terraform -chdir=infra test
+  needs: []
 
 python:lint-test:
   stage: test
@@ -87,6 +88,7 @@ python:lint-test:
     - ruff check --config app/pyproject.toml scripts/
     - pytest app/tests/unit
     - pytest scripts/tests
+  needs: []
 
 .wif:
   extends: .terraform
@@ -187,6 +189,7 @@ test:sql:
     expire_in: 1 day
     reports:
       junit: sql-junit.xml
+  needs: []
 .plan:
   extends: .wif
   stage: plan

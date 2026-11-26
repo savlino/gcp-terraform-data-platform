@@ -36,6 +36,17 @@ Do not weaken the environment rules to make a bootstrap plan pass.
 | P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. | Non-null `after`, PROD only |
 | P12 | The project of every managed change equals `--project-id` (`dep-2610-<env>`), resolved in a fixed order (see below); a project change between `before` and `after` (including a replacement) fails. Unresolvable types fail. | Before and after, including deletes and replacements |
 | P13 | On the P10 types, `deletion_protection` `true` -> `false` or `force_destroy` `false` -> `true` fails unless the address is listed in `--allow-destroy-file`. `--allow-destroy`/`ALLOW_DESTROY` do not disable it. | P10 types with non-null `before` and `after` |
+| P14 | `--destroy-mode` only: every managed change is a pure delete (`actions == ["delete"]`), and nothing deleted still has `deletion_protection == true`, `force_destroy == false` (bucket) or `delete_contents_on_destroy == false` (dataset). | All managed changes of a `terraform plan -destroy` plan |
+
+`--destroy-mode` checks a `terraform plan -destroy` plan for
+`scripts/tf.ps1 -Action destroy`: P10 and P13 do not fire, P12 still requires
+every deleted resource to be in `--project-id`, and P14 applies. It cannot be
+combined with `--allow-destroy`, `ALLOW_DESTROY` or `--allow-destroy-file`
+(exit 2). The output starts the summary with `DESTROY MODE` and lists every
+address to be destroyed. P14 exists because these protections are enforced by
+the provider at delete time, not at plan time: without it an apply would stop
+partway, after unprotected resources are already gone. See the
+[runbook](runbook.md#tear-down-an-environment).
 
 P4-P9 and P11 ignore deletes (`after == null`); P10 inspects delete actions.
 `--allow-destroy-file PATH` lists resource addresses (one per line; blank lines
@@ -99,7 +110,7 @@ not enable this globally in CI. Prefer `--allow-destroy-file`, which exempts
 only the listed addresses; `scripts/tf.ps1` uses only the file.
 P1/P2/P3 continue rejecting forbidden resources even during destruction.
 
-JUnit contains one testcase for each P0-P13. Failures name every violating
+JUnit contains one testcase for each P0-P14. Failures name every violating
 address. A rule with skips and no failures is skipped; when both occur, failure
 takes precedence and skipped details remain in `system-out`.
 `policy:dev` consumes the full DEV plan artifact, passes `--env dev --project-id dep-2610-dev`, and publishes

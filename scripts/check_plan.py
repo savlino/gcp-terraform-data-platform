@@ -38,6 +38,18 @@ P13  On the P10 types, deletion_protection true -> false  Before and after both
      or force_destroy false -> true fails unless the      non-null
      address is in --allow-destroy-file (--allow-destroy
      and ALLOW_DESTROY do not disable it).
+P14  --destroy-mode only: every managed change is a pure  All managed changes
+     delete (actions == ["delete"]; a create, update or
+     replacement fails), and nothing being deleted still
+     has deletion_protection == true, force_destroy ==
+     false (buckets) or delete_contents_on_destroy ==
+     false (datasets): the provider would stop the apply
+     partway, after other resources are gone.
+
+--destroy-mode (for `terraform plan -destroy`): P10 and P13 do not fire; P12
+still checks that every deleted resource is in --project-id. It cannot be
+combined with --allow-destroy, ALLOW_DESTROY or --allow-destroy-file. The
+summary starts with "DESTROY MODE" and lists every address to be destroyed.
 
 --allow-destroy-file lists one resource address per line; blank lines and
 lines starting with # are ignored; each address may appear only once.
@@ -55,7 +67,7 @@ from dataclasses import dataclass
 
 type JSON = None | bool | int | float | str | list[JSON] | dict[str, JSON]
 
-RULES = tuple(f"P{number}" for number in range(14))
+RULES = tuple(f"P{number}" for number in range(15))
 BASIC_ROLES = {"roles/owner", "roles/editor", "roles/viewer"}
 PUBLIC_MEMBERS = {"allUsers", "allAuthenticatedUsers"}
 STATEFUL = {
@@ -216,6 +228,7 @@ def evaluate(
     allow_destroy: bool,
     allow_entries: tuple[str, ...] = (),
     allow_file: str = "the allow-destroy file",
+    destroy_mode: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     allowed = frozenset(allow_entries)
@@ -231,6 +244,9 @@ def evaluate(
         if resource.kind.endswith(("_iam_binding", "_iam_policy")):
             check.fail("P3", "authoritative IAM is forbidden; use additive IAM members")
         check_project(check, project_id)
+        if destroy_mode:
+            check_destroy(check)
+            continue
         stateful = resource.kind in STATEFUL
         allowed_address = resource.address in allowed
         if stateful and "delete" in resource.actions:
@@ -403,6 +419,39 @@ def check_protection(check: Check, allowed: bool) -> bool:
     return relaxed
 
 
+def check_destroy(check: Check) -> None:
+    """P14: a destroy plan only deletes, and nothing it deletes is still protected."""
+    resource = check.resource
+    if resource.actions != ["delete"]:
+        check.fail(
+            "P14",
+            f"destroy plan must only delete; actions {json.dumps(resource.actions)}",
+        )
+        return
+    before = resource.before or {}
+    if before.get("deletion_protection") is True:
+        check.fail(
+            "P14",
+            "deletion_protection is true; set it to false through a reviewed MR and apply "
+            "before destroying",
+        )
+    if resource.kind == "google_storage_bucket" and before.get("force_destroy") is False:
+        check.fail(
+            "P14",
+            "force_destroy is false, so a non-empty bucket cannot be deleted; set it to true "
+            "through a reviewed MR and apply before destroying",
+        )
+    if (
+        resource.kind == "google_bigquery_dataset"
+        and before.get("delete_contents_on_destroy") is False
+    ):
+        check.fail(
+            "P14",
+            "delete_contents_on_destroy is false, so a dataset with unmanaged tables cannot be "
+            "deleted; set it to true through a reviewed MR and apply before destroying",
+        )
+
+
 def read_allow_list(path: str) -> tuple[str, ...]:
     with open(path, encoding="utf-8-sig") as source:
         lines = (line.strip() for line in source)
@@ -497,12 +546,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-destroy-file", help="Addresses exempt from P10 and P13, one per line"
     )
+    parser.add_argument(
+        "--destroy-mode",
+        action="store_true",
+        help="Check a `terraform plan -destroy` plan: P10/P13 off, P12 on, P14 on",
+    )
     args = parser.parse_args(argv)
+    env_allow = os.environ.get("ALLOW_DESTROY", "").lower() == "true"
+    if args.destroy_mode and (args.allow_destroy or env_allow or args.allow_destroy_file):
+        print(
+            "ERROR: --destroy-mode cannot be combined with --allow-destroy, ALLOW_DESTROY "
+            "or --allow-destroy-file",
+            file=sys.stderr,
+        )
+        return 2
     try:
         with open(args.plan_json, encoding="utf-8-sig") as source:
             document = json.load(source)
         resources = managed_resources(document)
-        allow_destroy = args.allow_destroy or os.environ.get("ALLOW_DESTROY", "").lower() == "true"
+        allow_destroy = args.allow_destroy or env_allow
         entries = read_allow_list(args.allow_destroy_file) if args.allow_destroy_file else ()
         findings = evaluate(
             resources,
@@ -511,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             allow_destroy,
             entries,
             args.allow_destroy_file or "the allow-destroy file",
+            args.destroy_mode,
         )
         if args.junit:
             write_junit(args.junit, findings)
@@ -523,6 +586,11 @@ def main(argv: list[str] | None = None) -> int:
     violations = sum(not f.skipped for f in findings)
     skipped = sum(f.skipped for f in findings)
     status = "FAIL" if violations else "PASS"
+    if args.destroy_mode:
+        deleted = [r.address for r in resources if "delete" in r.actions]
+        print(f"DESTROY MODE: {args.env} ({args.project_id}), {len(deleted)} to destroy")
+        for address in deleted:
+            print(f"  - {address}")
     print(
         f"{status}: {len(resources)} resource changes checked, "
         f"{violations} violations, {skipped} skipped"

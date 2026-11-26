@@ -470,9 +470,9 @@ def test_junit_failure_and_skip(tmp_path):
     )
     assert result.returncode == 1
     suite = ET.parse(report).getroot()
-    assert suite.attrib["tests"] == "14"
+    assert suite.attrib["tests"] == "15"
     cases = {case.attrib["name"]: case for case in suite.findall("testcase")}
-    assert set(cases) == {f"P{i}" for i in range(14)}
+    assert set(cases) == {f"P{i}" for i in range(15)}
     failure = cases["P4"].find("failure")
     assert failure is not None
     assert "bad.role" in failure.attrib["message"]
@@ -957,3 +957,184 @@ def test_without_allow_file_there_is_no_allowance_and_no_stale_check(tmp_path):
     assert result.returncode == 1
     assert f"FAIL [P10] {TABLE}: stateful delete/replacement" in result.stdout
     assert "stale" not in result.stdout
+
+
+# Destroy mode: `terraform plan -destroy` plans (actions ["delete"], after null).
+
+
+def deleted(kind, address, before=None, project=ENV_PROJECT):
+    return rc(kind, address, actions=["delete"], before=before or {}, project=project)
+
+
+def destroy_plan(*changes):
+    dataset_delete = deleted(
+        "google_bigquery_dataset", "module.bigquery.google_bigquery_dataset.main"
+    )
+    return {"resource_changes": [dataset_delete, *changes]}
+
+
+TABLE_DELETE = deleted(
+    "google_bigquery_table",
+    "module.bigquery.google_bigquery_table.tiles",
+    {"deletion_protection": False},
+)
+BUCKET_DELETE = deleted(
+    "google_storage_bucket",
+    "module.storage.google_storage_bucket.raw",
+    {"force_destroy": True, "name": f"{ENV_PROJECT}-raw"},
+)
+
+
+def test_destroy_mode_delete_in_the_right_project_passes(tmp_path):
+    result = cli(tmp_path, destroy_plan(TABLE_DELETE, BUCKET_DELETE), "--destroy-mode")
+    assert result.returncode == 0, result.stdout
+    assert f"DESTROY MODE: dev ({ENV_PROJECT}), 3 to destroy" in result.stdout
+    assert "  - module.storage.google_storage_bucket.raw" in result.stdout
+    assert result.stdout.rstrip().splitlines()[-1].startswith("PASS:")
+
+
+def test_destroy_mode_delete_in_another_project_fails_p12(tmp_path):
+    foreign = deleted(
+        "google_bigquery_table",
+        "module.bigquery.google_bigquery_table.foreign",
+        {"deletion_protection": False},
+        project="dep-2610-prod",
+    )
+    result = cli(tmp_path, destroy_plan(foreign), "--destroy-mode")
+    assert result.returncode == 1
+    assert (
+        'FAIL [P12] module.bigquery.google_bigquery_table.foreign: before.project "dep-2610-prod"'
+        in result.stdout
+    )
+
+
+def test_destroy_mode_derived_project_of_deleted_iam_member_fails_p12(tmp_path):
+    member = rc(
+        "google_service_account_iam_member",
+        "google_service_account_iam_member.foreign",
+        actions=["delete"],
+        before={"service_account_id": "projects/dep-2610-prod/serviceAccounts/x@y"},
+        project=None,
+    )
+    result = cli(tmp_path, destroy_plan(member), "--destroy-mode")
+    assert result.returncode == 1
+    assert "FAIL [P12] google_service_account_iam_member.foreign" in result.stdout
+
+
+@pytest.mark.parametrize("actions", [["create"], ["update"], ["delete", "create"], ["no-op"]])
+def test_destroy_mode_non_delete_change_fails_p14(tmp_path, actions):
+    change = rc(
+        "google_storage_bucket_iam_member",
+        "google_storage_bucket_iam_member.extra",
+        actions=actions,
+        before=None if actions == ["create"] else {"bucket": f"b/{ENV_PROJECT}-raw"},
+        after={
+            "bucket": f"b/{ENV_PROJECT}-raw",
+            "role": "roles/storage.objectViewer",
+            "member": "serviceAccount:a@b",
+        },
+        project=None,
+    )
+    result = cli(tmp_path, destroy_plan(change), "--destroy-mode")
+    assert result.returncode == 1
+    assert "FAIL [P14] google_storage_bucket_iam_member.extra: destroy plan must only delete" in (
+        result.stdout
+    )
+
+
+def test_destroy_mode_p10_and_p13_do_not_fire(tmp_path):
+    # Without --destroy-mode the same plan fails P10 for every stateful delete.
+    document = destroy_plan(TABLE_DELETE, BUCKET_DELETE)
+    normal = cli(tmp_path, document)
+    assert "FAIL [P10]" in normal.stdout
+    result = cli(tmp_path, document, "--destroy-mode")
+    assert result.returncode == 0
+    assert "[P10]" not in result.stdout
+    assert "[P13]" not in result.stdout
+
+
+def test_destroy_mode_protection_relaxation_reports_p14_not_p13(tmp_path):
+    # P13 can only fire on an update (before and after non-null). The same relaxation
+    # fails P13 in a normal plan; in destroy mode it is reported once, as P14.
+    relax = rc(
+        "google_bigquery_table",
+        "module.bigquery.google_bigquery_table.tiles",
+        actions=["update"],
+        before={"deletion_protection": True},
+        after={"deletion_protection": False},
+    )
+    normal = cli(tmp_path, destroy_plan(relax))
+    assert "FAIL [P13] module.bigquery.google_bigquery_table.tiles" in normal.stdout
+    result = cli(tmp_path, destroy_plan(relax), "--destroy-mode")
+    assert result.returncode == 1
+    assert "[P13]" not in result.stdout
+    assert (
+        "FAIL [P14] module.bigquery.google_bigquery_table.tiles: destroy plan must only delete"
+        in (result.stdout)
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        (
+            deleted(
+                "google_bigquery_table",
+                "module.bigquery.google_bigquery_table.tiles",
+                {"deletion_protection": True},
+            ),
+            "deletion_protection is true",
+        ),
+        (
+            deleted(
+                "google_cloud_run_v2_job",
+                "module.ingest_job.google_cloud_run_v2_job.ingest[0]",
+                {"deletion_protection": True},
+            ),
+            "deletion_protection is true",
+        ),
+        (
+            deleted(
+                "google_storage_bucket",
+                "module.storage.google_storage_bucket.raw",
+                {"force_destroy": False, "name": f"{ENV_PROJECT}-raw"},
+            ),
+            "force_destroy is false",
+        ),
+        (
+            deleted(
+                "google_bigquery_dataset",
+                "module.bigquery.google_bigquery_dataset.network_perf",
+                {"delete_contents_on_destroy": False},
+            ),
+            "delete_contents_on_destroy is false",
+        ),
+    ],
+)
+def test_destroy_mode_protected_resource_fails_p14(tmp_path, change, message):
+    result = cli(tmp_path, destroy_plan(change), "--destroy-mode")
+    assert result.returncode == 1
+    assert f"FAIL [P14] {change['address']}: {message}" in result.stdout
+
+
+def test_destroy_mode_empty_plan_fails_p0(tmp_path):
+    result = cli(tmp_path, {"resource_changes": []}, "--destroy-mode")
+    assert result.returncode == 1
+    assert "FAIL [P0] <plan>: check would pass vacuously" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("args", "allow_destroy"),
+    [(["--allow-destroy"], None), ([], "true"), (["--allow-destroy-file", "x"], None)],
+)
+def test_destroy_mode_rejects_destroy_overrides(tmp_path, args, allow_destroy):
+    result = cli(
+        tmp_path, destroy_plan(TABLE_DELETE), "--destroy-mode", *args, allow_destroy=allow_destroy
+    )
+    assert result.returncode == 2
+    assert "--destroy-mode cannot be combined" in result.stderr
+
+
+def test_p14_never_fires_without_destroy_mode(tmp_path):
+    result = cli(tmp_path, plan(rc("google_project_iam_member", after={"role": "roles/x"})))
+    assert "[P14]" not in result.stdout

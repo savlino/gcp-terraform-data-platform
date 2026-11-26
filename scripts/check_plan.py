@@ -27,6 +27,11 @@ P10  No delete/replace of google_storage_bucket,               Delete actions
 P11  google_bigquery_table.deletion_protection == true;        PROD, non-null after
      google_storage_bucket.force_destroy == false;
      no member or members item starting with "user:".
+     For an address in --allow-destroy-file the two
+     protection checks print "ALLOW [P11] <address>:
+     protection relaxed by allow-destroy entry" instead of
+     failing; the user: check is never exempted. P11 does
+     not mark an entry as used (only P10 and P13 do).
 P12  The project of every change equals --project-id; a   Before and after
      project change (including replacements) fails.       (deletes too)
      Resolution order: (1) the project attribute;
@@ -110,6 +115,7 @@ class Finding:
     address: str
     message: str
     skipped: bool = False
+    allowed: bool = False  # reported as ALLOW; neither a violation nor a skip
 
 
 @dataclass(frozen=True)
@@ -205,6 +211,23 @@ class Check:
         if known and not matches:
             self.fail(rule, f"{field} must be {json.dumps(expected)}")
 
+    def require_protection(self, rule: str, field: str, expected: bool, allowed: bool) -> None:
+        """Like require, but an allow-listed address is reported as ALLOW, not FAIL."""
+        known, value = self.field(rule, field)
+        if not known or value is expected:
+            return
+        if not allowed:
+            self.fail(rule, f"{field} must be {json.dumps(expected)}")
+            return
+        self.findings.append(
+            Finding(
+                rule,
+                self.resource.address,
+                "protection relaxed by allow-destroy entry",
+                allowed=True,
+            )
+        )
+
     def principals(self, rule: str, prod: bool = False) -> None:
         for field in ("member", "members"):
             # A partially unknown collection must not hide a known public/user member.
@@ -281,10 +304,11 @@ def evaluate(
         ):
             check_labels(check, env)
         if env == "prod":
+            # Protection attributes respect the allow-destroy file; user: principals never do.
             if resource.kind == "google_bigquery_table":
-                check.require("P11", "deletion_protection", True)
+                check.require_protection("P11", "deletion_protection", True, allowed_address)
             if resource.kind == "google_storage_bucket":
-                check.require("P11", "force_destroy", False)
+                check.require_protection("P11", "force_destroy", False, allowed_address)
             check.principals("P11", prod=True)
     findings.extend(allow_list_findings(allow_entries, used, allow_file))
     return findings
@@ -513,7 +537,7 @@ def check_labels(check: Check, env: str) -> None:
 
 
 def write_junit(path: str, findings: list[Finding]) -> None:
-    failed = {finding.rule for finding in findings if not finding.skipped}
+    failed = {finding.rule for finding in findings if not (finding.skipped or finding.allowed)}
     skipped = {finding.rule for finding in findings if finding.skipped} - failed
     suite = ET.Element(
         "testsuite",
@@ -525,14 +549,15 @@ def write_junit(path: str, findings: list[Finding]) -> None:
     for rule in RULES:
         case = ET.SubElement(suite, "testcase", classname="plan-policy", name=rule)
         relevant = [f for f in findings if f.rule == rule]
-        failures = [f"{f.address}: {f.message}" for f in relevant if not f.skipped]
+        failures = [f"{f.address}: {f.message}" for f in relevant if not (f.skipped or f.allowed)]
         skips = [f"{f.address}: {f.message}" for f in relevant if f.skipped]
+        allows = [f"ALLOW {f.address}: {f.message}" for f in relevant if f.allowed]
         if failures:
             ET.SubElement(case, "failure", message="\n".join(failures)).text = "\n".join(failures)
         elif skips:
             ET.SubElement(case, "skipped", message="\n".join(skips))
-        if skips:
-            ET.SubElement(case, "system-out").text = "\n".join(skips)
+        if skips or allows:
+            ET.SubElement(case, "system-out").text = "\n".join(skips + allows)
     ET.ElementTree(suite).write(path, encoding="utf-8", xml_declaration=True)
 
 
@@ -581,9 +606,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: {error}", file=sys.stderr)
         return 2
     for finding in findings:
-        status = "SKIP" if finding.skipped else "FAIL"
+        status = "ALLOW" if finding.allowed else "SKIP" if finding.skipped else "FAIL"
         print(f"{status} [{finding.rule}] {finding.address}: {finding.message}")
-    violations = sum(not f.skipped for f in findings)
+    violations = sum(not (f.skipped or f.allowed) for f in findings)
     skipped = sum(f.skipped for f in findings)
     status = "FAIL" if violations else "PASS"
     if args.destroy_mode:

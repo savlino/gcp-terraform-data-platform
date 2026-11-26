@@ -33,7 +33,7 @@ Do not weaken the environment rules to make a bootstrap plan pass.
 | P8 | Every `network_interface` has empty `access_config`. | Instances with non-null `after` |
 | P9 | If `labels` is present, require `project`, `env`, `managed_by` keys and `labels.env == --env`; ignore `effective_labels` and `terraform_labels`. | Non-null `after` containing labels |
 | P10 | No delete/replace of bucket, dataset, table, secret container or Artifact Registry repository without intentional override. Every `--allow-destroy-file` entry must allow at least one P10 or P13 finding; stale and duplicate entries fail. | Actions containing `delete`, including delete/create replacements; allow-file entries |
-| P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. | Non-null `after`, PROD only |
+| P11 | Tables require `deletion_protection == true`; buckets require `force_destroy == false`; no `user:` member or members item. For an address in `--allow-destroy-file` the two protection checks print `ALLOW [P11] <address>: protection relaxed by allow-destroy entry` instead of failing; the `user:` check is never exempted. | Non-null `after`, PROD only |
 | P12 | The project of every managed change equals `--project-id` (`dep-2610-<env>`), resolved in a fixed order (see below); a project change between `before` and `after` (including a replacement) fails. Unresolvable types fail. | Before and after, including deletes and replacements |
 | P13 | On the P10 types, `deletion_protection` `true` -> `false` or `force_destroy` `false` -> `true` fails unless the address is listed in `--allow-destroy-file`. `--allow-destroy`/`ALLOW_DESTROY` do not disable it. | P10 types with non-null `before` and `after` |
 | P14 | `--destroy-mode` only: every managed change is a pure delete (`actions == ["delete"]`), and nothing deleted still has `deletion_protection == true`, `force_destroy == false` (bucket) or `delete_contents_on_destroy == false` (dataset). | All managed changes of a `terraform plan -destroy` plan |
@@ -50,11 +50,13 @@ partway, after unprotected resources are already gone. See the
 
 P4-P9 and P11 ignore deletes (`after == null`); P10 inspects delete actions.
 `--allow-destroy-file PATH` lists resource addresses (one per line; blank lines
-and `#` comments ignored); only those addresses are exempt from P10 and P13. A
+and `#` comments ignored); entries cover P10, P13 and the protection part of
+P11 (never its `user:` check), and only for the listed addresses. A
 missing file is an input error (exit 2); without `--allow-destroy-file` nothing
 is allowed per address and no stale check runs. After all rules run, every
 listed address must have been used to allow a stateful delete/replace (P10) or
-a protection relaxation (P13); otherwise
+a protection relaxation (P13); a P11 `ALLOW` does not count as use, so an
+entry for a resource relaxed by an earlier apply is stale. Otherwise
 `FAIL [P10] <address>: stale allow-destroy entry; remove it from <file>`. This
 catches typos and entries left over from an earlier migration. An address
 listed twice fails as a duplicate. P13 stops an environment-wide
@@ -102,9 +104,10 @@ project:
 `--project-id` is required when invoking the checker directly. See the
 [local Terraform procedure](runbook.md#local-terraform-only-through-scriptstfps1).
 
-Exit codes: `0` no violations (possibly skips), `1` policy violations, `2`
-input/usage/report-write errors. Output lists findings and a checked/violated/
-skipped summary. For deliberate destructive work only, `--allow-destroy` or
+Exit codes: `0` no violations (possibly skips or `ALLOW` lines), `1` policy
+violations, `2` input/usage/report-write errors. Output lists findings
+(`FAIL`, `SKIP`, `ALLOW`) and a checked/violated/skipped summary; `ALLOW` is
+neither a violation nor a skip. For deliberate destructive work only, `--allow-destroy` or
 `ALLOW_DESTROY=true` disables **P10 only** (all addresses; not P12 or P13). Do
 not enable this globally in CI. Prefer `--allow-destroy-file`, which exempts
 only the listed addresses; `scripts/tf.ps1` uses only the file.
@@ -112,7 +115,8 @@ P1/P2/P3 continue rejecting forbidden resources even during destruction.
 
 JUnit contains one testcase for each P0-P14. Failures name every violating
 address. A rule with skips and no failures is skipped; when both occur, failure
-takes precedence and skipped details remain in `system-out`.
+takes precedence and skipped details remain in `system-out`. `ALLOW` lines
+are not failures; they are listed in the rule's `system-out`.
 `policy:dev` consumes the full DEV plan artifact, passes `--env dev --project-id dep-2610-dev`, and publishes
 the restricted one-day JUnit report even on policy failure. Its rules match the
 plan job so fork MRs cannot depend on a missing cloud plan. `python:lint-test`

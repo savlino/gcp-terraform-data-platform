@@ -1138,3 +1138,115 @@ def test_destroy_mode_rejects_destroy_overrides(tmp_path, args, allow_destroy):
 def test_p14_never_fires_without_destroy_mode(tmp_path):
     result = cli(tmp_path, plan(rc("google_project_iam_member", after={"role": "roles/x"})))
     assert "[P14]" not in result.stdout
+
+
+# P11 in PROD: the allow-destroy file exempts the protection checks only.
+
+PROD = ["--env", "prod"]
+ALLOW_LINE = "ALLOW [P11] {}: protection relaxed by allow-destroy entry"
+
+
+def test_p11_prod_listed_relaxation_prints_allow_and_passes(tmp_path):
+    document = plan(unprotect_table(), unprotect_bucket())
+    result = cli(tmp_path, document, *PROD, *allow_file(tmp_path, TABLE, BUCKET))
+    assert result.returncode == 0, result.stdout
+    assert "FAIL [P11]" not in result.stdout
+    assert "[P13]" not in result.stdout
+    assert ALLOW_LINE.format(TABLE) in result.stdout
+    assert ALLOW_LINE.format(BUCKET) in result.stdout
+    assert "stale" not in result.stdout
+    assert result.stdout.rstrip().splitlines()[-1] == (
+        "PASS: 3 resource changes checked, 0 violations, 0 skipped"
+    )
+
+
+def test_p11_prod_unlisted_relaxation_fails_p11_and_p13(tmp_path):
+    result = cli(tmp_path, plan(unprotect_table(), unprotect_bucket()), *PROD)
+    assert result.returncode == 1
+    assert f"FAIL [P11] {TABLE}: deletion_protection must be true" in result.stdout
+    assert f"FAIL [P11] {BUCKET}: force_destroy must be false" in result.stdout
+    assert f"FAIL [P13] {TABLE}:" in result.stdout
+    assert f"FAIL [P13] {BUCKET}:" in result.stdout
+    assert "ALLOW" not in result.stdout
+
+
+def test_p11_prod_exemption_covers_only_listed_address(tmp_path):
+    document = plan(unprotect_table(), unprotect_bucket())
+    result = cli(tmp_path, document, *PROD, *allow_file(tmp_path, BUCKET))
+    assert result.returncode == 1
+    assert ALLOW_LINE.format(BUCKET) in result.stdout
+    assert f"FAIL [P11] {TABLE}: deletion_protection must be true" in result.stdout
+    assert f"FAIL [P13] {TABLE}:" in result.stdout
+    assert f"ALLOW [P11] {TABLE}" not in result.stdout
+
+
+def test_p11_prod_user_member_fails_even_if_listed(tmp_path):
+    member = "module.storage.google_storage_bucket_iam_member.human"
+    grant = rc(
+        "google_storage_bucket_iam_member",
+        member,
+        after={
+            "bucket": f"{ENV_PROJECT}-raw",
+            "role": "roles/storage.objectViewer",
+            "member": "user:someone@example.com",
+        },
+    )
+    document = plan(unprotect_table(), grant)
+    result = cli(tmp_path, document, *PROD, *allow_file(tmp_path, TABLE, member))
+    assert result.returncode == 1
+    assert f"FAIL [P11] {member}:" in result.stdout
+    assert "user:" in result.stdout
+    assert f"ALLOW [P11] {member}" not in result.stdout
+    assert ALLOW_LINE.format(TABLE) in result.stdout
+    # Unchanged stale detection: P11 does not use an entry, so the member line is stale.
+    assert f"FAIL [P10] {member}: stale allow-destroy entry" in result.stdout
+
+
+def already_relaxed_table():
+    return rc(
+        "google_bigquery_table",
+        TABLE,
+        ["update"],
+        before={"deletion_protection": False, "description": "old"},
+        after={"deletion_protection": False, "description": "new"},
+    )
+
+
+def already_relaxed_bucket():
+    relaxed = {**PROTECTED_BUCKET, "force_destroy": True}
+    return rc(
+        "google_storage_bucket",
+        BUCKET,
+        ["update"],
+        before={**relaxed, "storage_class": "STANDARD"},
+        after={**relaxed, "storage_class": "NEARLINE"},
+    )
+
+
+@pytest.mark.parametrize(
+    "change,address", [(already_relaxed_table, TABLE), (already_relaxed_bucket, BUCKET)]
+)
+def test_p11_allow_does_not_mark_entry_used(tmp_path, change, address):
+    # Relaxed by an earlier apply: P11 prints ALLOW, but no P10/P13 finding used the
+    # entry, so it is still reported as stale (stale detection unchanged).
+    result = cli(tmp_path, plan(change()), *PROD, *allow_file(tmp_path, address))
+    assert result.returncode == 1
+    assert ALLOW_LINE.format(address) in result.stdout
+    assert f"FAIL [P10] {address}: stale allow-destroy entry" in result.stdout
+
+
+def test_p11_allow_is_not_a_junit_failure(tmp_path):
+    report = tmp_path / "policy.xml"
+    document = plan(unprotect_table())
+    args = [*PROD, *allow_file(tmp_path, TABLE), "--junit", str(report)]
+    result = cli(tmp_path, document, *args)
+    assert result.returncode == 0, result.stdout
+    cases = {case.attrib["name"]: case for case in ET.parse(report).getroot()}
+    assert cases["P11"].find("failure") is None
+    assert f"ALLOW {TABLE}: protection relaxed" in cases["P11"].find("system-out").text
+
+
+def test_no_allow_lines_outside_prod(tmp_path):
+    result = cli(tmp_path, plan(unprotect_table()), *allow_file(tmp_path, TABLE))
+    assert result.returncode == 0, result.stdout
+    assert "ALLOW" not in result.stdout

@@ -23,10 +23,21 @@ fails on any delete/replace unless the address is listed in
 bootstrap/allow-destroy (same format and stale-entry rule as infra), and prints
 N to add / change / destroy plus every address to be destroyed.
 
+-Action destroy (infra only): tears down one environment. Same init as plan,
+then terraform plan -destroy to <env>.destroy.tfplan, then check_plan.py
+--destroy-mode (P10/P13 off; P12 still requires every deleted resource to be in
+dep-2610-<env>; P14 requires a pure-delete plan with no resource still
+protected). Prints the number of resources to destroy and their addresses, and
+applies only after the operator types the environment name exactly. PROD is
+refused unless -AllowProd is passed. The allow-destroy file is not used, any
+saved normal plan for the environment is discarded, and the destroy plan and
+its JSON are deleted in all cases.
+
 .EXAMPLE
 .\scripts\tf.ps1 -Env dev -Action plan
 .\scripts\tf.ps1 -Env dev -Action apply
 .\scripts\tf.ps1 -Root bootstrap -Action plan
+.\scripts\tf.ps1 -Env dev -Action destroy
 #>
 [CmdletBinding()]
 param(
@@ -34,12 +45,15 @@ param(
     [string]$Env,
 
     [Parameter(Mandatory = $true)]
-    [ValidateSet('plan', 'apply')]
+    [ValidateSet('plan', 'apply', 'destroy')]
     [string]$Action,
 
-    # Last, so existing positional calls (-Env, -Action) bind as before.
+    # After -Env and -Action, so existing positional calls bind as before.
     [ValidateSet('infra', 'bootstrap')]
-    [string]$Root = 'infra'
+    [string]$Root = 'infra',
+
+    # Required for -Env prod -Action destroy; has no other effect.
+    [switch]$AllowProd
 )
 
 Set-StrictMode -Version 2.0
@@ -50,6 +64,12 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $isBootstrap = $Root -eq 'bootstrap'
 if ($isBootstrap -and $Env) { throw '-Env does not apply to -Root bootstrap: bootstrap has one state for all projects.' }
 if (-not $isBootstrap -and -not $Env) { throw '-Env (dev, test or prod) is required for -Root infra.' }
+if ($Action -eq 'destroy' -and $isBootstrap) {
+    throw '-Action destroy is for infra environments only; bootstrap holds the state bucket and CI identities.'
+}
+if ($Action -eq 'destroy' -and $Env -eq 'prod' -and -not $AllowProd) {
+    throw 'Refusing to destroy prod without -AllowProd.'
+}
 
 $rootDir = Join-Path $repoRoot $Root
 if ($isBootstrap) {
@@ -69,6 +89,9 @@ $planName = "$label.tfplan"
 $planPath = Join-Path $rootDir $planName
 $jsonPath = Join-Path $rootDir "$label.plan.json"
 $markerPath = Join-Path $rootDir "$label.tfplan.meta.json"
+$destroyPlanName = "$label.destroy.tfplan"
+$destroyPlanPath = Join-Path $rootDir $destroyPlanName
+$destroyJsonPath = Join-Path $rootDir "$label.destroy.plan.json"
 
 if ($isBootstrap) {
     Write-Host "=== Terraform root: bootstrap | project: $projectId (state, WIF, CI accounts; grants in dev/test/prod) | action: $Action ==="
@@ -220,6 +243,38 @@ try {
         $applyCommand = if ($isBootstrap) { '.\scripts\tf.ps1 -Root bootstrap -Action apply' } else { ".\scripts\tf.ps1 -Env $Env -Action apply" }
         Write-Host "Plan for $label ($projectId) passed the policy check. Review it, then run: $applyCommand (within $MaxPlanAgeMinutes minutes)."
     }
+    elseif ($Action -eq 'destroy') {
+        # A normal plan saved before the teardown must never be applied after it.
+        Remove-Item -LiteralPath $planPath, $jsonPath, $markerPath, $destroyPlanPath, $destroyJsonPath -Force -ErrorAction SilentlyContinue
+        if (Test-Path -LiteralPath $allowDestroyPath) {
+            Write-Warning "$allowDestroyPath is ignored in destroy mode."
+        }
+
+        Invoke-Native 'terraform plan -destroy' {
+            terraform "-chdir=$rootDir" plan -destroy -input=false -lock-timeout=120s "-var-file=env/$Env.tfvars" "-out=$destroyPlanName"
+        }
+        $json = terraform "-chdir=$rootDir" show -json $destroyPlanName
+        if ($LASTEXITCODE -ne 0) { throw "terraform show failed with exit code $LASTEXITCODE." }
+        [System.IO.File]::WriteAllText($destroyJsonPath, ($json -join "`n"), (New-Object System.Text.UTF8Encoding($false)))
+
+        $python = Get-PythonExe
+        $policyOutput = @(& $python (Join-Path $repoRoot 'scripts\check_plan.py') $destroyJsonPath --env $Env --project-id $projectId --destroy-mode)
+        $policyExit = $LASTEXITCODE
+        $policyOutput | ForEach-Object { Write-Host $_ }
+        if ($policyExit -ne 0) { throw "Destroy plan policy check failed with exit code $policyExit; nothing was destroyed." }
+        $summary = $policyOutput | ForEach-Object { "$_" } | Where-Object { $_ -match '^DESTROY MODE: .* (\d+) to destroy$' } | Select-Object -First 1
+        if (-not $summary) { throw 'Destroy plan policy check printed no DESTROY MODE summary; nothing was destroyed.' }
+        $count = [int]([regex]::Match($summary, '(\d+) to destroy$').Groups[1].Value)
+
+        Write-Warning "Destroying $count resource(s) in $Env ($projectId), listed above. Data and secret values are lost; this cannot be undone."
+        $typed = Read-Host "Type the environment name ($Env) to destroy it, anything else to cancel"
+        if ($typed -cne $Env) { throw "Confirmation '$typed' does not match '$Env'; nothing was destroyed." }
+
+        Invoke-Native 'terraform apply (destroy plan)' {
+            terraform "-chdir=$rootDir" apply -input=false -lock-timeout=120s $destroyPlanName
+        }
+        Write-Host "Destroyed $count resource(s) in $Env ($projectId)."
+    }
     else {
         Invoke-Native 'terraform apply' {
             terraform "-chdir=$rootDir" apply -input=false -lock-timeout=120s $planName
@@ -230,6 +285,9 @@ try {
     }
 }
 finally {
+    if ($Action -eq 'destroy') {
+        Remove-Item -LiteralPath $destroyPlanPath, $destroyJsonPath -Force -ErrorAction SilentlyContinue
+    }
     if ($null -eq $previousDataDir) {
         Remove-Item Env:\TF_DATA_DIR -ErrorAction SilentlyContinue
     }

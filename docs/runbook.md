@@ -64,6 +64,11 @@ P13 enforces this: any plan that turns `deletion_protection` from `true` to
 secret or Artifact Registry repository fails unless that address is listed.
 An environment-wide flip therefore fails with one finding per resource.
 
+Exception: tearing down a whole environment
+([Tear down an environment](#tear-down-an-environment)) is the one case where
+every resource is meant to go, so the environment-wide flags are flipped on
+purpose, for PROD only.
+
 Resources that never hold data (for example a view or a staging object that
 is always rebuilt) set `deletion_protection = false` explicitly in code, with a
 comment saying why, instead of reading the environment variable. There is no
@@ -152,6 +157,70 @@ ADC configured:
    with **No value for required variable** naming `developer_principal`, not
    a plan deleting human grants. Backend initialization still requires working
    authentication/connectivity. Do not run apply for this check.
+
+### Tear down an environment
+
+Deletes every Terraform-managed resource of one environment: raw bucket and its
+objects, dataset and tables with their data, Cloud Run job, scheduler, secret
+container with all versions, service accounts, IAM members, network. Bootstrap
+(state bucket, WIF, CI accounts, registry, budget), the project itself and its
+APIs are not touched; the environment's state stays in the state bucket under
+`infra/<env>`, empty.
+
+```powershell
+.\scripts\tf.ps1 -Env dev -Action destroy
+.\scripts\tf.ps1 -Env prod -Action destroy -AllowProd   # refused without -AllowProd
+```
+
+What the script does (destroy mode):
+
+1. Same init as plan: per-environment `TF_DATA_DIR`, `-reconfigure` with the
+   environment backend. Any saved normal plan for the environment is discarded,
+   so a plan made before the teardown cannot be applied after it.
+2. `terraform plan -destroy` to `<env>.destroy.tfplan`, JSON without BOM.
+3. `check_plan.py --destroy-mode`: P10 and P13 do not fire; P12 still fails if
+   any deleted resource belongs to another project; P14 fails if the plan
+   creates, updates or replaces anything, or if a resource is still protected
+   (`deletion_protection = true`, bucket `force_destroy = false`, dataset
+   `delete_contents_on_destroy = false`). Those protections are enforced by the
+   provider only at delete time, so without P14 the apply would stop partway.
+   `infra\<env>.allow-destroy` is ignored.
+4. Prints `DESTROY MODE: <env> (<project>), N to destroy` and every address.
+5. Asks for the environment name; only an exact, case-sensitive match applies
+   the saved destroy plan. Anything else cancels with nothing destroyed.
+6. Deletes the destroy plan and its JSON in all cases.
+
+Before you start:
+
+- No ingest execution is running:
+  `gcloud run jobs executions list --job <env>-ingest --region europe-southwest1 --project dep-2610-<env> --limit 3`.
+- DEV and TEST already have `force_destroy = true`, `deletion_protection = false`
+  and `delete_contents_on_destroy = true` in their tfvars, so P14 passes.
+- **PROD keeps all three protections on.** Remove them first through a reviewed
+  MR to `infra/env/prod.tfvars` (`force_destroy = true`,
+  `deletion_protection = false`, `delete_contents_on_destroy = true`), merge
+  and apply it through the normal promotion; only then run the destroy.
+  **Known gap:** that MR fails `policy:prod` by design (P11 requires the
+  protections in PROD, P13 rejects relaxing them, and CI uses no allow file).
+  There is no reviewed path for a PROD teardown yet; it needs a policy change
+  first. Do not work around it with `--allow-destroy` or by editing the plan.
+
+Not recreated automatically by a later apply:
+
+- **Secret values.** The secret container is recreated empty. Add the Telegram
+  token again ([Add a secret version](#add-a-secret-version)) before the first
+  scheduled run.
+- **The auto-created `default` network.** It was removed by hand
+  ([Remove only the auto-created default network](#remove-only-the-auto-created-default-network))
+  and is not in Terraform: a teardown does not bring it back, and a rebuild
+  does not need it.
+- **Data.** Raw objects, `ookla_tiles`, `load_log` and the mart are gone. The
+  empty `load_log` means the next run copies and builds every configured
+  quarter again (cost and time of a first load).
+
+Rebuild: `.\scripts\tf.ps1 -Env <env> -Action plan`, review, `-Action apply`,
+add the secret version, then verify as after a first deployment. For PROD,
+restore the protections in the same MR that rebuilds it.
 
 ## GitLab WIF bootstrap and MR plans
 
